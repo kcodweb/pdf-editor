@@ -84,6 +84,7 @@ let pendingPlace = null;
 let styleSnap = null;
 let clip = null;
 let pickAnchor = null;
+let quietLoad = false; // tool pages load files without the editor's toasts and confirmations
 
 /* ---------------- helpers ---------------- */
 
@@ -120,7 +121,8 @@ function busy(on, msg) {
   $('hint').textContent = on ? msg : (state.pages.length ? TOOL_HINTS[state.tool] : '');
 }
 
-const MODALS = ['sigModal', 'dlModal', 'splitModal', 'decorModal', 'imgModal', 'ocrModal', 'keysModal'];
+const MODALS = ['pwModal', 'sigModal', 'dlModal', 'splitModal', 'decorModal', 'imgModal', 'ocrModal', 'keysModal'];
+const inEditor = () => document.body.dataset.view === 'editor';
 function openModal(id) {
   $(id).hidden = false;
 }
@@ -130,7 +132,8 @@ function closeModal(id) {
 const openModalId = () => MODALS.find((id) => !$(id).hidden);
 // Some dialogs need to undo things when dismissed.
 function dismissModal(id) {
-  if (id === 'sigModal') closeSignature();
+  if (id === 'pwModal') { if (pwDismiss) pwDismiss(); else closeModal(id); }
+  else if (id === 'sigModal') closeSignature();
   else if (id === 'decorModal') closeDecor(false);
   else closeModal(id);
 }
@@ -359,7 +362,7 @@ async function openFiles(files, replace) {
     toast('Choose PDF or image files.');
     return;
   }
-  if (replace && dirty && state.pages.length && !confirm('Open a new file? Your unsaved edits will be lost.')) return;
+  if (replace && dirty && state.pages.length && !confirm('Open a new file? Your unsaved edits in the editor will be lost.')) return;
   if (pdfs.length) {
     const opened = await loadPdfFiles(replace ? pdfs.slice(0, 1) : pdfs, replace);
     if (opened) replace = false;
@@ -373,7 +376,17 @@ async function loadPdfFiles(files, replace) {
   try {
     const loaded = [];
     for (const file of files) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bytes = new Uint8Array(await file.arrayBuffer());
+      let encrypted = false;
+      try {
+        const unlocked = await unlockBytes(bytes, file.name);
+        if (!unlocked) continue; // password prompt cancelled
+        ({ bytes, encrypted } = unlocked);
+      } catch (err) {
+        console.warn(err);
+        toast(`"${file.name}" is protected in a way this app can't open.`);
+        continue;
+      }
       let pdf;
       try {
         // pdf.js takes ownership of the buffer it is given, so hand it a copy.
@@ -398,7 +411,7 @@ async function loadPdfFiles(files, replace) {
         const vp = page.getViewport({ scale: 1 });
         pages.push({ id: uid(), index: i, baseW: vp.width, baseH: vp.height, rot0: page.rotate % 360, rot: 0, annots: [] });
       }
-      loaded.push({ file, bytes, pdf, pages, hasForm });
+      loaded.push({ file, bytes, pdf, pages, hasForm, encrypted });
     }
     if (!loaded.length) return false;
 
@@ -407,14 +420,14 @@ async function loadPdfFiles(files, replace) {
 
     const firstNew = state.pages.length;
     for (const l of loaded) {
-      const src = state.sources.push({ bytes: l.bytes, pdf: l.pdf, name: l.file.name, hasForm: l.hasForm }) - 1;
+      const src = state.sources.push({ bytes: l.bytes, pdf: l.pdf, name: l.file.name, hasForm: l.hasForm, encrypted: l.encrypted }) - 1;
       for (const pg of l.pages) state.pages.push({ ...pg, src });
     }
     renderAll();
     if (replace) {
       viewer.scrollTop = 0;
-      if (loaded[0].hasForm) toast('This PDF has fillable fields — click a field to fill it in.');
-    } else {
+      if (loaded[0].hasForm && !quietLoad) toast('This PDF has fillable fields — click a field to fill it in.');
+    } else if (!quietLoad) {
       scrollToPage(state.pages[firstNew].id);
       const n = state.pages.length - firstNew;
       toast(`Added ${n} page${n === 1 ? '' : 's'}.`);
@@ -425,8 +438,11 @@ async function loadPdfFiles(files, replace) {
   }
 }
 
-// Each image becomes a page (US Letter, turned to match the image) with the image centered.
-async function addImagePages(files, replace) {
+const PAGE_SIZES = { letter: [612, 792], a4: [595.28, 841.89] };
+
+// Each image becomes a page with the image centered. Options: size 'letter' | 'a4' | 'fit'
+// (page matches the image), orientation 'auto' | 'portrait' | 'landscape', margin in points.
+async function addImagePages(files, replace, { size = 'letter', orientation = 'auto', margin = 24 } = {}) {
   busy(true, 'Adding images…');
   try {
     if (replace) resetDocument(files[0].name.replace(/\.[^.]+$/, '') || 'images');
@@ -435,10 +451,19 @@ async function addImagePages(files, replace) {
       try {
         const imageId = await importImageFile(file);
         const im = state.images[imageId];
-        const landscape = im.w > im.h;
-        const W = landscape ? 792 : 612;
-        const H = landscape ? 612 : 792;
-        const margin = 24;
+        let W;
+        let H;
+        if (size === 'fit') {
+          // Keep the image's pixel size at 96 DPI, capped to a reasonable page size.
+          const k = Math.min(0.75, 1440 / Math.max(im.w, im.h));
+          W = im.w * k + margin * 2;
+          H = im.h * k + margin * 2;
+        } else {
+          const [a, b] = PAGE_SIZES[size] || PAGE_SIZES.letter;
+          const landscape = orientation === 'landscape' || (orientation === 'auto' && im.w > im.h);
+          W = landscape ? b : a;
+          H = landscape ? a : b;
+        }
         const s = Math.min((W - margin * 2) / im.w, (H - margin * 2) / im.h);
         const w = im.w * s;
         const h = im.h * s;
@@ -456,8 +481,8 @@ async function addImagePages(files, replace) {
     state.pages.push(...pages);
     dirty = true;
     renderAll();
-    if (!replace) scrollToPage(state.pages[first].id);
-    toast(`Added ${pages.length} image page${pages.length === 1 ? '' : 's'}.`);
+    if (!replace && !quietLoad) scrollToPage(state.pages[first].id);
+    if (!quietLoad) toast(`Added ${pages.length} image page${pages.length === 1 ? '' : 's'}.`);
   } finally {
     busy(false);
   }
@@ -1523,20 +1548,20 @@ function copySelectionTo(clipboardData) {
 }
 
 document.addEventListener('copy', (e) => {
-  if (isTyping(e.target) || openModalId() || !selectedAnnot()) return;
+  if (!inEditor() || isTyping(e.target) || openModalId() || !selectedAnnot()) return;
   e.preventDefault();
   copySelectionTo(e.clipboardData);
 });
 
 document.addEventListener('cut', (e) => {
-  if (isTyping(e.target) || openModalId() || !selectedAnnot()) return;
+  if (!inEditor() || isTyping(e.target) || openModalId() || !selectedAnnot()) return;
   e.preventDefault();
   copySelectionTo(e.clipboardData);
   deleteSelected();
 });
 
 document.addEventListener('paste', async (e) => {
-  if (isTyping(e.target) || openModalId() || !state.pages.length) return;
+  if (!inEditor() || isTyping(e.target) || openModalId() || !state.pages.length) return;
   const data = e.clipboardData;
   const file = [...data.files].find((f) => f.type.startsWith('image/'));
   const text = data.getData('text/plain');
@@ -1718,6 +1743,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') dismissModal(modal);
     return;
   }
+  if (!inEditor()) return; // tool pages have no editor shortcuts
   const mod = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
   if (e.key === 'Escape' && !$('moreMenu').hidden) { toggleMenu(false); return; }
@@ -1760,7 +1786,8 @@ window.addEventListener('dragenter', (e) => {
   if (!hasFiles(e)) return;
   e.preventDefault();
   dropDepth++;
-  $('dropmask').firstElementChild.textContent = state.pages.length ? 'Drop PDFs or images to add pages' : 'Drop files to open';
+  $('dropmask').firstElementChild.textContent = !inEditor() ? 'Drop files here'
+    : state.pages.length ? 'Drop PDFs or images to add pages' : 'Drop files to open';
   $('dropmask').hidden = false;
 });
 window.addEventListener('dragleave', (e) => {
@@ -1773,7 +1800,9 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   dropDepth = 0;
   $('dropmask').hidden = true;
-  openFiles([...e.dataTransfer.files], !state.pages.length);
+  const files = [...e.dataTransfer.files];
+  if (!inEditor()) { hubDrop(files); return; }
+  openFiles(files, !state.pages.length);
 });
 
 window.addEventListener('beforeunload', (e) => {
@@ -1802,3 +1831,4 @@ initSearch();
 initOcr();
 initDecor();
 updateUI();
+initHub();

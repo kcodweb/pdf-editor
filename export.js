@@ -515,9 +515,16 @@ async function drawDecor(out, page, p, items, fonts) {
 
 /* ---------------- compression ---------------- */
 
-// Re-encodes large JPEG photos at a lower resolution/quality. Text and vector content is untouched.
+// Inflates a zlib (FlateDecode) stream with the browser's built-in decompressor.
+async function inflate(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// Re-encodes large photos and bitmap images as smaller JPEGs. Text and vector content is untouched.
+// JPEGs are always candidates; lossless (Flate) images only when they're big enough to matter.
 async function compressImages(out, level) {
-  const { PDFName, PDFArray, PDFRawStream, PDFNumber } = PDFLib;
+  const { PDFName, PDFArray, PDFDict, PDFRawStream, PDFNumber } = PDFLib;
   const { maxDim, quality } = level === 'strong' ? { maxDim: 1200, quality: 0.55 } : { maxDim: 2000, quality: 0.75 };
   const name = (n) => PDFName.of(n);
 
@@ -527,25 +534,51 @@ async function compressImages(out, level) {
     if (String(dict.get(name('Subtype'))) !== '/Image') continue;
     const filter = dict.lookup(name('Filter'));
     const filterName = filter instanceof PDFArray ? (filter.size() === 1 ? String(filter.get(0)) : '') : String(filter);
-    if (filterName !== '/DCTDecode' || dict.has(name('Decode')) || dict.has(name('ImageMask'))) continue;
+    if (!['/DCTDecode', '/FlateDecode'].includes(filterName) || dict.has(name('Decode')) || dict.has(name('ImageMask'))) continue;
     const cs = dict.lookup(name('ColorSpace'));
     const csName = cs instanceof PDFArray ? String(cs.get(0)) : String(cs);
     if (!['/DeviceRGB', '/DeviceGray', '/ICCBased', '/CalRGB', '/CalGray'].includes(csName)) continue;
+    let components = /Gray/.test(csName) ? 1 : 3;
     if (csName === '/ICCBased') {
       const icc = cs.lookup(1);
       const n = icc && icc.dict && icc.dict.lookup(name('N'));
       if (n && n.asNumber() === 4) continue; // CMYK
+      if (n) components = n.asNumber();
     }
     if (obj.contents.length < 50000) continue;
 
     try {
-      const bitmap = await createImageBitmap(new Blob([obj.contents], { type: 'image/jpeg' }));
-      const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+      let source;
+      if (filterName === '/DCTDecode') {
+        source = await createImageBitmap(new Blob([obj.contents], { type: 'image/jpeg' }));
+      } else {
+        // Raw 8-bit pixels without PNG predictors; images with a soft mask keep it (/SMask stays).
+        const parms = dict.lookup(name('DecodeParms'));
+        const predictor = parms instanceof PDFDict ? parms.lookup(name('Predictor')) : null;
+        const bpc = dict.lookup(name('BitsPerComponent'));
+        if ((predictor && predictor.asNumber() > 1) || !bpc || bpc.asNumber() !== 8) continue;
+        const w = dict.lookup(name('Width')).asNumber();
+        const h = dict.lookup(name('Height')).asNumber();
+        const tooBig = Math.max(w, h) > maxDim;
+        if (!tooBig && level !== 'strong') continue;
+        const raw = await inflate(obj.contents);
+        if (raw.length < w * h * components) continue;
+        const pixels = new ImageData(w, h);
+        for (let i = 0, j = 0; i < w * h; i++, j += components) {
+          const k = i * 4;
+          pixels.data[k] = raw[j];
+          pixels.data[k + 1] = components === 3 ? raw[j + 1] : raw[j];
+          pixels.data[k + 2] = components === 3 ? raw[j + 2] : raw[j];
+          pixels.data[k + 3] = 255;
+        }
+        source = await createImageBitmap(pixels);
+      }
+      const scale = Math.min(1, maxDim / Math.max(source.width, source.height));
       const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-      canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-      bitmap.close();
+      canvas.width = Math.max(1, Math.round(source.width * scale));
+      canvas.height = Math.max(1, Math.round(source.height * scale));
+      canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+      source.close();
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
       const bytes = new Uint8Array(await blob.arrayBuffer());
       if (bytes.length > obj.contents.length * 0.9) continue;
@@ -688,18 +721,23 @@ function openSplitDialog() {
   updateSplitPreview();
 }
 
+// Builds one PDF per part (arrays of page indices) and bundles them in a ZIP.
+async function buildSplitZip(parts) {
+  const zip = new JSZip();
+  const ctx = createExportContext();
+  for (let i = 0; i < parts.length; i++) {
+    $('hint').textContent = `Splitting… part ${i + 1} of ${parts.length}`;
+    const bytes = await buildFinalPdf(parts[i].map((idx) => state.pages[idx]), {}, ctx);
+    zip.file(`${String(i + 1).padStart(2, '0')}-${state.fileName}-p${pagesLabel(parts[i])}.pdf`, bytes);
+  }
+  return zip.generateAsync({ type: 'blob' });
+}
+
 async function runSplit(parts) {
   finishEdit();
   busy(true, 'Splitting…');
   try {
-    const zip = new JSZip();
-    const ctx = createExportContext();
-    for (let i = 0; i < parts.length; i++) {
-      $('hint').textContent = `Splitting… part ${i + 1} of ${parts.length}`;
-      const bytes = await buildFinalPdf(parts[i].map((idx) => state.pages[idx]), {}, ctx);
-      zip.file(`${String(i + 1).padStart(2, '0')}-${state.fileName}-p${pagesLabel(parts[i])}.pdf`, bytes);
-    }
-    const blob = await zip.generateAsync({ type: 'blob' });
+    const blob = await buildSplitZip(parts);
     saveBlob(blob, `${state.fileName}-split.zip`);
     toast(`Downloaded ${parts.length} PDFs as ${state.fileName}-split.zip`);
   } catch (err) {
@@ -725,15 +763,11 @@ function openImageExportDialog() {
   openModal('imgModal');
 }
 
-async function runImageExport(pages, format, dpi) {
-  if (!pages.length || document.body.classList.contains('busy')) return;
-  finishEdit();
-  busy(true, 'Rendering images…');
-  let doc = null;
+// Renders the finished pages (with every edit, form answer and page number) to image files.
+async function renderPagesToImages(pages, format, dpi) {
+  const bytes = await buildPdf(pages, { flatten: true });
+  const doc = await pdfjsLib.getDocument({ data: bytes, cMapUrl: `${PDFJS_CDN}cmaps/`, cMapPacked: true, standardFontDataUrl: `${PDFJS_CDN}standard_fonts/` }).promise;
   try {
-    // Render the finished PDF so the images include every edit, form answer and page number.
-    const bytes = await buildPdf(pages, { flatten: true });
-    doc = await pdfjsLib.getDocument({ data: bytes, cMapUrl: `${PDFJS_CDN}cmaps/`, cMapPacked: true, standardFontDataUrl: `${PDFJS_CDN}standard_fonts/` }).promise;
     const ext = format === 'jpeg' ? 'jpg' : 'png';
     const digits = String(state.pages.length).length;
     const files = [];
@@ -744,12 +778,27 @@ async function runImageExport(pages, format, dpi) {
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(vp.width);
       canvas.height = Math.round(vp.height);
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, intent: 'print' }).promise;
+      const c2d = canvas.getContext('2d');
+      c2d.fillStyle = '#fff';
+      c2d.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: c2d, viewport: vp, intent: 'print' }).promise;
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, `image/${format}`, 0.92));
       const n = String(state.pages.indexOf(pages[i]) + 1).padStart(digits, '0');
       files.push({ name: `${state.fileName}-page-${n}.${ext}`, blob });
       canvas.width = canvas.height = 0;
     }
+    return files;
+  } finally {
+    doc.destroy();
+  }
+}
+
+async function runImageExport(pages, format, dpi) {
+  if (!pages.length || document.body.classList.contains('busy')) return;
+  finishEdit();
+  busy(true, 'Rendering images…');
+  try {
+    const files = await renderPagesToImages(pages, format, dpi);
     if (files.length === 1) {
       saveBlob(files[0].blob, files[0].name);
       toast(`Downloaded ${files[0].name}`);
@@ -764,7 +813,6 @@ async function runImageExport(pages, format, dpi) {
     console.error(err);
     toast(`Couldn't create the images: ${err.message}`);
   } finally {
-    if (doc) doc.destroy();
     busy(false);
   }
 }

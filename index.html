@@ -3,17 +3,118 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PDF Editor</title>
-<meta name="description" content="Edit PDFs in your browser: change existing text, fill forms, add text, shapes, stamps, comments, signatures and page numbers, split, merge and convert. Files never leave your device.">
+<title>PDF Worker — Free online PDF tools that keep your files private</title>
+<meta name="description" content="Merge, split, compress, convert, edit, sign and protect PDFs in your browser. Free, no sign-up, and your files never leave your device.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2h8l5 5v15H6z'/%3E%3Cpath d='M14 2v5h5M9 13h7M9 17h5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body data-view="home">
+<div class="site" id="site">
+  <header class="sitebar">
+    <a class="brand" href="#/">
+      <svg viewBox="0 0 24 24" class="logo"><path d="M6 2h8l5 5v15H6z"/><path d="M14 2v5h5M9 13h7M9 17h5"/></svg>
+      <span>PDF Worker</span>
+    </a>
+    <nav class="sitenav" aria-label="Popular tools">
+      <a href="#/merge">Merge</a>
+      <a href="#/split">Split</a>
+      <a href="#/compress">Compress</a>
+      <a href="#/pdf-to-word">PDF to Word</a>
+      <a href="#/jpg-to-pdf">Images to PDF</a>
+      <a href="#/sign">Sign</a>
+    </nav>
+    <div class="spacer"></div>
+    <a class="btn primary" href="#/edit">Open editor</a>
+  </header>
+
+  <main class="site-scroll" id="siteScroll">
+    <section id="homeView">
+      <div class="hero">
+        <h1>Every PDF tool you need, <span>right in your browser</span></h1>
+        <p>Merge, split, compress, convert, edit, sign and protect PDFs. Free, no sign-up, no watermarks — and your files never leave your device.</p>
+        <div class="hero-search">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>
+          <input id="homeSearch" type="search" placeholder="Search tools, e.g. compress, word, sign" aria-label="Search tools">
+        </div>
+      </div>
+      <div class="cat-row" id="homeCats"></div>
+      <div class="tool-grid" id="homeGrid"></div>
+      <p class="muted home-empty" id="homeEmpty" hidden>No tools match your search.</p>
+
+      <div class="trust">
+        <div class="trust-item"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
+          <div><b>Private by design</b><span>Files are processed on your own device. Nothing is uploaded to a server.</span></div></div>
+        <div class="trust-item"><svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>
+          <div><b>Fast, no waiting</b><span>No upload or download queues — results are ready in seconds.</span></div></div>
+        <div class="trust-item"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+          <div><b>Free, no limits</b><span>No account, no watermarks, no daily caps. Works offline once loaded.</span></div></div>
+      </div>
+    </section>
+
+    <section id="toolView" hidden>
+      <div class="tv-head">
+        <a class="tv-back" href="#/">← All tools</a>
+        <div class="tv-title">
+          <span class="tool-icon big" id="tvIcon"></span>
+          <div><h1 id="tvName"></h1><p id="tvDesc"></p></div>
+        </div>
+      </div>
+
+      <div class="tv-pick" id="tvPick">
+        <div class="tv-drop" id="tvDrop">
+          <svg viewBox="0 0 24 24" class="tv-drop-icon"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+          <button type="button" class="btn primary big" id="tvChoose">Select files</button>
+          <p class="muted" id="tvDropHint">or drop files here</p>
+        </div>
+        <p class="tv-private"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg> Your files are processed on this device and never uploaded.</p>
+      </div>
+
+      <div class="tv-work" id="tvWork" hidden>
+        <div class="tv-main" id="tvMain"></div>
+        <aside class="tv-side">
+          <div id="tvOptions" class="tv-options"></div>
+          <button type="button" class="btn primary big tv-run" id="tvRun">Continue</button>
+          <button type="button" class="btn link" id="tvReset">Choose different files</button>
+        </aside>
+      </div>
+
+      <div class="tv-done" id="tvDone" hidden>
+        <div class="tv-done-card">
+          <div class="tv-check"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+          <h2 id="tvDoneTitle"></h2>
+          <p class="muted" id="tvDoneDetail"></p>
+          <div class="tv-done-actions">
+            <button type="button" class="btn primary big" id="tvDownload">Download</button>
+            <button type="button" class="btn big" id="tvEditResult">Open in editor</button>
+          </div>
+          <button type="button" class="btn link" id="tvAgain">Start over</button>
+          <div class="tv-next-wrap" id="tvNextWrap">
+            <div class="muted small">Continue with</div>
+            <div class="tv-next" id="tvNext"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tv-progress" id="tvProgress" hidden>
+        <div class="spinner"></div>
+        <div id="tvProgressText">Working…</div>
+      </div>
+    </section>
+
+    <footer class="sitefoot">
+      <span>PDF Worker — everything runs in your browser.</span>
+      <a href="https://github.com/kcodweb/pdf-editor">Source code</a>
+    </footer>
+  </main>
+  <input type="file" id="tvInput" hidden>
+</div>
+
+<div class="editor-view" id="editorView">
 <header class="topbar">
-  <div class="brand">
+  <a class="brand" href="#/" title="All PDF tools">
     <svg viewBox="0 0 24 24" class="logo"><path d="M6 2h8l5 5v15H6z"/><path d="M14 2v5h5M9 13h7M9 17h5"/></svg>
-    <span>PDF Editor</span>
-  </div>
+    <span>PDF Worker</span>
+  </a>
 
   <div class="group">
     <button id="btnOpen" class="btn" title="Open a PDF or images (Ctrl+O)">Open</button>
@@ -158,6 +259,22 @@
 </div>
 
 <footer class="statusbar"><span id="hint"></span><span id="pageInfo"></span></footer>
+</div>
+
+<!-- Password -->
+<div class="modal" id="pwModal" hidden>
+  <form class="modal-card narrow" id="pwForm" role="dialog" aria-labelledby="pwTitle">
+    <h2 id="pwTitle">This PDF is password-protected</h2>
+    <p class="muted">Enter the password to open <b id="pwFile"></b>.</p>
+    <input type="password" id="pwInput" class="text-input" autocomplete="current-password" aria-label="Password">
+    <p class="error-text small" id="pwError" hidden>That password isn't right. Try again.</p>
+    <div class="modal-actions">
+      <div class="spacer"></div>
+      <button type="button" class="btn" id="pwCancel">Cancel</button>
+      <button type="submit" class="btn primary">Open</button>
+    </div>
+  </form>
+</div>
 
 <input type="file" id="filePdf" accept="application/pdf,.pdf,image/*" multiple hidden>
 <input type="file" id="fileMerge" accept="application/pdf,.pdf,image/*" multiple hidden>
@@ -423,6 +540,9 @@
 <script src="decor.js"></script>
 <script src="export.js"></script>
 <script src="signature.js"></script>
+<script src="secure.js"></script>
+<script src="convert.js"></script>
+<script src="hub.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
