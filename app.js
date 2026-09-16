@@ -25,13 +25,14 @@ const TOOL_HINTS = {
   draw: 'Drag on a page to draw freehand.',
   highlight: 'Drag over an area to highlight it.',
   shape: 'Drag to draw. Hold Shift for straight lines at 45° steps.',
-  whiteout: 'Drag over content to cover it with white.',
+  whiteout: 'Drag over content to cover it with white. To remove text for good, use Redact or the privacy option when downloading.',
+  redact: 'Drag over anything that must be removed. On download, redacted pages become images, so the hidden content is gone for good.',
   note: 'Click to pin a comment. Other PDF viewers show it as a sticky note.',
   stamp: 'Pick a stamp in the toolbar, then click where it goes.',
   image: 'Click on a page where the image should go. You can also paste an image with Ctrl+V.',
   sign: 'Click on a page where your signature should go.',
 };
-const RECT_KINDS = { highlight: 'highlight', whiteout: 'whiteout' };
+const RECT_KINDS = { highlight: 'highlight', whiteout: 'whiteout', redact: 'redact' };
 const NOTE_SIZE = 22;
 
 const STAMPS = {
@@ -59,6 +60,7 @@ const state = {
   formDefaults: {}, // answers already in the file
   formOptions: {},  // choice field options, for export
   decor: null,      // page numbers, headers, watermark (see decor.js)
+  ocr: {},          // recognized text lines for scanned pages (see textlayer.js)
   tool: 'select',
   colors: { text: '#111827', draw: '#e11d48', highlight: '#facc15', shape: '#2563eb', note: '#fde047', sign: '#1e3a8a' },
   sizes: { text: 16, draw: 3, shape: 2 },
@@ -118,7 +120,7 @@ function busy(on, msg) {
   $('hint').textContent = on ? msg : (state.pages.length ? TOOL_HINTS[state.tool] : '');
 }
 
-const MODALS = ['sigModal', 'dlModal', 'splitModal', 'decorModal', 'imgModal', 'keysModal'];
+const MODALS = ['sigModal', 'dlModal', 'splitModal', 'decorModal', 'imgModal', 'ocrModal', 'keysModal'];
 function openModal(id) {
   $(id).hidden = false;
 }
@@ -134,8 +136,16 @@ function dismissModal(id) {
 }
 
 const measureCtx = document.createElement('canvas').getContext('2d');
-const fontCss = (a) => `${a.italic ? 'italic ' : ''}${a.bold ? 700 : 400} ${a.size}px ${cssFontStack(a.font)}`;
+// Text annotations using the PDF's original font fall back to a similar family when needed.
+const effectiveFamily = (a) => (a.font === 'original' ? a.fallback || 'sans' : a.font);
+const fontCss = (a) => `${a.italic ? 'italic ' : ''}${a.bold ? 700 : 400} ${a.size}px ${cssFontStack(effectiveFamily(a))}`;
+const origScreenText = (info, text) => [...text].map((ch) => info.screenFor.get(ch) ?? ch).join('');
 function textWidth(text, a) {
+  const info = a.type === 'text' ? origFontState(a) : null;
+  if (info && info.family) {
+    measureCtx.font = `${a.size}px "${info.family}"`;
+    return measureCtx.measureText(origScreenText(info, text)).width;
+  }
   measureCtx.font = fontCss(a);
   return measureCtx.measureText(text).width;
 }
@@ -324,7 +334,7 @@ function resetDocument(fileName) {
   if (!$('searchbar').hidden) closeSearch();
   state.sources.forEach((s) => s.pdf.destroy());
   Object.assign(state, {
-    sources: [], pages: [], images: {}, forms: {}, formDefaults: {}, formOptions: {}, decor: null,
+    sources: [], pages: [], images: {}, forms: {}, formDefaults: {}, formOptions: {}, decor: null, ocr: {},
     selected: null, current: 0, pageSel: new Set(), fileName,
   });
   undoStack.length = 0;
@@ -332,6 +342,10 @@ function resetDocument(fileName) {
   thumbCache.clear();
   widgetCache.clear();
   lineCache.clear();
+  origFonts.clear();
+  inspectDocs.clear();
+  imageElements.clear();
+  noTextHinted.clear();
   clip = null;
   pagesEl.replaceChildren();
   dirty = false;
@@ -365,6 +379,7 @@ async function loadPdfFiles(files, replace) {
         // pdf.js takes ownership of the buffer it is given, so hand it a copy.
         pdf = await pdfjsLib.getDocument({
           data: bytes.slice(),
+          fontExtraProperties: true, // keeps character mappings so edits can reuse the PDF's fonts
           cMapUrl: `${PDFJS_CDN}cmaps/`,
           cMapPacked: true,
           standardFontDataUrl: `${PDFJS_CDN}standard_fonts/`,
@@ -533,6 +548,7 @@ async function renderCanvas(el) {
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    buildTextLayer(el, p); // image pages get one after OCR
     return;
   }
   try {
@@ -596,16 +612,19 @@ function annotEl(a) {
   switch (a.type) {
     case 'text': {
       if (a.cover) wrap.appendChild(coverEl(a.cover));
+      // Preview with the PDF's own font when it's loaded and has every character.
+      const info = origFontState(a);
+      const useOrig = !!(info && info.family);
       const t = svgEl('text', {
         'font-size': a.size,
         fill: a.color,
-        'font-family': cssFontStack(a.font),
-        'font-weight': a.bold ? 700 : 400,
-        'font-style': a.italic ? 'italic' : 'normal',
+        'font-family': useOrig ? `"${info.family}", ${cssFontStack(effectiveFamily(a))}` : cssFontStack(effectiveFamily(a)),
+        'font-weight': a.bold && !useOrig ? 700 : 400,
+        'font-style': a.italic && !useOrig ? 'italic' : 'normal',
       });
       a.text.split('\n').forEach((line, i) => {
         const ts = svgEl('tspan', { x: a.x, y: a.y + a.size * (0.8 + 1.2 * i) });
-        ts.textContent = line || ' ';
+        ts.textContent = (useOrig ? origScreenText(info, line) : line) || ' ';
         t.appendChild(ts);
       });
       wrap.appendChild(t);
@@ -625,6 +644,8 @@ function annotEl(a) {
         wrap.appendChild(svgEl('rect', { ...base, fill: a.color, 'fill-opacity': 0.4, style: 'mix-blend-mode:multiply' }));
       } else if (a.kind === 'whiteout') {
         wrap.appendChild(svgEl('rect', { ...base, fill: a.fill || '#fff' }));
+      } else if (a.kind === 'redact') {
+        wrap.appendChild(svgEl('rect', { ...base, fill: '#000' }));
       } else if (a.kind === 'ellipse') {
         wrap.appendChild(svgEl('ellipse', { cx: a.x + a.w / 2, cy: a.y + a.h / 2, rx: a.w / 2, ry: a.h / 2, fill: 'none', stroke: a.color, 'stroke-width': a.width }));
       } else {
@@ -724,7 +745,7 @@ function getThumb(p) {
     const vp = page.getViewport({ scale: 300 / base.width, rotation });
     c.width = Math.ceil(vp.width);
     c.height = Math.ceil(vp.height);
-    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    await page.render({ canvasContext: c.getContext('2d'), viewport: vp, intent: 'print' }).promise;
     return c.toDataURL('image/jpeg', 0.8);
   })();
   thumbCache.set(key, job);
@@ -978,7 +999,7 @@ function setSelected(sel) {
 function styleTarget() {
   const a = selectedAnnot();
   if (a) {
-    const noColor = a.type === 'image' || (a.type === 'rect' && a.kind === 'whiteout');
+    const noColor = a.type === 'image' || (a.type === 'rect' && (a.kind === 'whiteout' || a.kind === 'redact'));
     let sizeProp = null;
     if (a.type === 'text') sizeProp = 'size';
     else if (a.type === 'ink' || a.type === 'line' || (a.type === 'rect' && (a.kind === 'outline' || a.kind === 'ellipse'))) sizeProp = 'width';
@@ -1026,6 +1047,8 @@ function applyTextStyle(prop, value) {
   if (target !== state.textStyle) {
     if (editing) editing.styleChanged = true;
     else pushHistory();
+    // The original embedded font has a fixed weight and style; switch to its look-alike family.
+    if (target.font === 'original' && (prop === 'bold' || prop === 'italic')) target.font = effectiveFamily(target);
     target[prop] = value;
     const p = findPage(editing ? editing.pageId : state.selected.pageId);
     renderOverlay(p);
@@ -1314,7 +1337,7 @@ pagesEl.addEventListener('dblclick', (e) => {
 function styleEditor(ta, a) {
   Object.assign(ta.style, {
     fontSize: `${a.size * state.zoom}px`,
-    fontFamily: cssFontStack(a.font),
+    fontFamily: cssFontStack(effectiveFamily(a)),
     fontWeight: a.bold ? 700 : 400,
     fontStyle: a.italic ? 'italic' : 'normal',
     color: a.color,
@@ -1388,6 +1411,9 @@ function finishEdit() {
       }
     } else {
       if (ed.isNew || !unchanged) pushHistory(ed.snap);
+      if (a.font === 'original' && a.orig && !origFontState(a) && !unchanged) {
+        toast("The PDF's original font doesn't include some of these characters, so this line uses the closest matching font.");
+      }
       // Keep the text selected so font, color and size changes apply to it.
       state.selected = { pageId: p.id, annotId: a.id };
     }
@@ -1618,6 +1644,7 @@ function toggleMenu(open) {
 
 const MENU_ACTIONS = {
   find: () => openSearch(),
+  ocr: () => openOcrDialog(),
   decor: () => openDecorDialog(),
   images: () => { $('fileImages').value = ''; $('fileImages').click(); },
   'export-images': () => openImageExportDialog(),
@@ -1683,7 +1710,7 @@ viewer.addEventListener('pointerdown', (e) => {
   if ((e.target === viewer || e.target === pagesEl) && state.selected) setSelected(null);
 });
 
-const TOOL_KEYS = { v: 'select', e: 'edittext', t: 'text', d: 'draw', h: 'highlight', r: 'shape', w: 'whiteout', n: 'note', m: 'stamp', i: 'image', s: 'sign' };
+const TOOL_KEYS = { v: 'select', e: 'edittext', t: 'text', d: 'draw', h: 'highlight', r: 'shape', w: 'whiteout', x: 'redact', n: 'note', m: 'stamp', i: 'image', s: 'sign' };
 const NUDGE_KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 document.addEventListener('keydown', (e) => {
   const modal = openModalId();
@@ -1772,5 +1799,6 @@ initSignature();
 initExportDialogs();
 initTextLayer();
 initSearch();
+initOcr();
 initDecor();
 updateUI();

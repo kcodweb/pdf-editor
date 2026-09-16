@@ -1,6 +1,8 @@
 // Offline support: the app shell is cached on install; fonts and pdf.js character maps are
 // cached the first time they're used. Bump VERSION when shipping changes to the app shell.
-const VERSION = 'pdf-editor-v3';
+const VERSION = 'pdf-editor-v4';
+// Text recognition (OCR) engine and language data are fetched on first use from these hosts.
+const CDN_HOSTS = ['cdnjs.cloudflare.com', 'cdn.jsdelivr.net'];
 
 const APP_SHELL = [
   './',
@@ -43,7 +45,7 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   const sameOrigin = url.origin === self.location.origin;
-  if (!sameOrigin && url.hostname !== 'cdnjs.cloudflare.com') return;
+  if (!sameOrigin && !CDN_HOSTS.includes(url.hostname)) return;
 
   // Fonts, libraries and character maps never change: cache first.
   const immutable = !sameOrigin || /\/(fonts|vendor)\//.test(url.pathname);

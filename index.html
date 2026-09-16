@@ -24,6 +24,7 @@
         <svg viewBox="0 0 24 24" class="chev"><path d="M6 9l6 6 6-6"/></svg></button>
       <div class="menu" id="moreMenu" role="menu" hidden>
         <button role="menuitem" data-menu="find" data-needs-doc>Find text<kbd>Ctrl+F</kbd></button>
+        <button role="menuitem" data-menu="ocr" data-needs-doc>Recognize text in scans (OCR)…</button>
         <button role="menuitem" data-menu="decor" data-needs-doc>Page numbers, headers &amp; watermark…</button>
         <hr>
         <button role="menuitem" data-menu="images">Images to PDF…</button>
@@ -43,6 +44,7 @@
     <button class="tool" data-tool="highlight" title="Highlight (H)"><svg viewBox="0 0 24 24"><path d="M9 11l-5 5v3h3l5-5M9 11l4-4 4 4-4 4zM14 20h7"/></svg><span>Highlight</span></button>
     <button class="tool" data-tool="shape" title="Shapes: box, circle, line, arrow (R)"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="10" height="10" rx="1"/><circle cx="16" cy="16" r="5"/></svg><span>Shapes</span></button>
     <button class="tool" data-tool="whiteout" title="White-out (W)"><svg viewBox="0 0 24 24"><path d="M7 20h13M4 15l9-9 6 6-7 7H8z"/></svg><span>White-out</span></button>
+    <button class="tool" data-tool="redact" title="Redact — permanently remove content (X)"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="1" fill="currentColor"/><path d="M3 4h10M3 20h7M15 20h6"/></svg><span>Redact</span></button>
     <button class="tool" data-tool="note" title="Comment (N)"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H10l-6 4z"/><path d="M8 8h8M8 12h5"/></svg><span>Comment</span></button>
     <button class="tool" data-tool="stamp" title="Stamp (M)"><svg viewBox="0 0 24 24"><path d="M9.5 3h5l-1 7h-3z"/><path d="M4 13h16v4H4zM6 21h12"/></svg><span>Stamp</span></button>
     <button class="tool" data-tool="image" title="Image (I)"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 16l-5-5-8 8"/></svg><span>Image</span></button>
@@ -51,9 +53,15 @@
 
   <div class="group" id="textStyle" hidden>
     <select id="fontFamily" title="Font">
+      <option value="original" hidden>Original font</option>
       <option value="sans">Sans</option>
       <option value="serif">Serif</option>
       <option value="mono">Mono</option>
+      <option value="arial">Arial / Helvetica style</option>
+      <option value="times">Times style</option>
+      <option value="courier">Courier style</option>
+      <option value="calibri">Calibri style</option>
+      <option value="cambria">Cambria style</option>
     </select>
     <button id="btnBold" class="icon-btn toggle" title="Bold (Ctrl+B)" aria-pressed="false"><b>B</b></button>
     <button id="btnItalic" class="icon-btn toggle" title="Italic (Ctrl+I)" aria-pressed="false"><i>I</i></button>
@@ -144,6 +152,7 @@
     <button class="icon-btn sm" id="searchPrev" title="Previous (Shift+Enter)"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
     <button class="icon-btn sm" id="searchNext" title="Next (Enter)"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
     <button class="btn sm" id="searchHighlight" title="Add a highlight to every match">Highlight all</button>
+    <button class="btn sm" id="searchRedact" title="Black out every match; removed permanently on download">Redact all</button>
     <button class="icon-btn sm" id="searchClose" title="Close (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
 </div>
@@ -196,6 +205,10 @@
       <legend>Form fields</legend>
       <label class="radio"><input type="radio" name="dlForms" value="keep" checked><span><b>Keep fillable</b> — others can still edit the fields</span></label>
       <label class="radio"><input type="radio" name="dlForms" value="flatten"><span><b>Flatten</b> — answers become part of the page</span></label>
+    </fieldset>
+    <fieldset id="dlSecureSet">
+      <legend>Privacy</legend>
+      <label class="check"><input type="checkbox" id="dlSecure"><span id="dlSecureLabel"><b>Permanently remove covered text</b> — pages with white-out, edited text or redactions become images, so the hidden words can't be copied or recovered. Their other text stays searchable.</span></label>
     </fieldset>
     <fieldset>
       <legend>File size</legend>
@@ -332,13 +345,56 @@
   </form>
 </div>
 
+<!-- OCR -->
+<div class="modal" id="ocrModal" hidden>
+  <form class="modal-card narrow" id="ocrForm" role="dialog" aria-labelledby="ocrTitle">
+    <h2 id="ocrTitle">Recognize text in scans</h2>
+    <p class="muted">Finds the words in scanned pages and photos so you can search, copy and edit them, and makes the downloaded PDF searchable. It runs on your device; the first time, it downloads the recognition engine and language data (a few MB).</p>
+    <fieldset>
+      <legend>Pages</legend>
+      <label class="radio"><input type="radio" name="ocrPages" value="textless" checked><span id="ocrTextlessLabel">Pages without text</span></label>
+      <label class="radio"><input type="radio" name="ocrPages" value="current"><span id="ocrCurrentLabel">Current page</span></label>
+      <label class="radio"><input type="radio" name="ocrPages" value="all"><span id="ocrAllLabel">All pages</span></label>
+    </fieldset>
+    <label class="stack-field" style="margin-top:14px">
+      <span>Language</span>
+      <select id="ocrLang" class="text-input">
+        <option value="eng">English</option>
+        <option value="spa">Spanish</option>
+        <option value="fra">French</option>
+        <option value="deu">German</option>
+        <option value="ita">Italian</option>
+        <option value="por">Portuguese</option>
+        <option value="nld">Dutch</option>
+        <option value="pol">Polish</option>
+        <option value="tur">Turkish</option>
+        <option value="rus">Russian</option>
+        <option value="ukr">Ukrainian</option>
+        <option value="ara">Arabic</option>
+        <option value="heb">Hebrew</option>
+        <option value="hin">Hindi</option>
+        <option value="chi_sim">Chinese (Simplified)</option>
+        <option value="chi_tra">Chinese (Traditional)</option>
+        <option value="jpn">Japanese</option>
+        <option value="kor">Korean</option>
+        <option value="vie">Vietnamese</option>
+      </select>
+    </label>
+    <div class="modal-actions">
+      <div class="spacer"></div>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Recognize text</button>
+    </div>
+  </form>
+</div>
+
 <!-- Keyboard shortcuts -->
 <div class="modal" id="keysModal" hidden>
   <div class="modal-card narrow" role="dialog" aria-labelledby="keysTitle">
     <h2 id="keysTitle">Keyboard shortcuts</h2>
     <dl class="keys">
       <dt><kbd>V</kbd> <kbd>E</kbd> <kbd>T</kbd> <kbd>D</kbd> <kbd>H</kbd></dt><dd>Select, edit text, add text, draw, highlight</dd>
-      <dt><kbd>R</kbd> <kbd>W</kbd> <kbd>N</kbd> <kbd>M</kbd> <kbd>I</kbd> <kbd>S</kbd></dt><dd>Shapes, white-out, comment, stamp, image, sign</dd>
+      <dt><kbd>R</kbd> <kbd>W</kbd> <kbd>X</kbd> <kbd>N</kbd> <kbd>M</kbd> <kbd>I</kbd> <kbd>S</kbd></dt><dd>Shapes, white-out, redact, comment, stamp, image, sign</dd>
       <dt><kbd>Ctrl</kbd>+<kbd>F</kbd></dt><dd>Find text</dd>
       <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Undo / redo</dd>
       <dt><kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>X</kbd> <kbd>V</kbd></dt><dd>Copy, cut, paste items (also paste images and text)</dd>

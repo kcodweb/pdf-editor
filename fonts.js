@@ -8,7 +8,26 @@ const FONT_FAMILIES = {
   sans: { css: 'EdSans', files: { r: 'NotoSans-Regular.ttf', b: 'NotoSans-Bold.ttf', i: 'NotoSans-Italic.ttf', bi: 'NotoSans-BoldItalic.ttf' } },
   serif: { css: 'EdSerif', files: { r: 'NotoSerif-Regular.ttf', b: 'NotoSerif-Bold.ttf', i: 'NotoSerif-Italic.ttf', bi: 'NotoSerif-BoldItalic.ttf' } },
   mono: { css: 'EdMono', files: { r: 'NotoSansMono-Regular.ttf', b: 'NotoSansMono-Bold.ttf' } },
+  // Metric-compatible with common document fonts, so edited text takes the same space as the original.
+  arial: { css: 'EdArial', files: { r: 'LiberationSans-Regular.ttf', b: 'LiberationSans-Bold.ttf', i: 'LiberationSans-Italic.ttf', bi: 'LiberationSans-BoldItalic.ttf' } },
+  times: { css: 'EdTimes', files: { r: 'LiberationSerif-Regular.ttf', b: 'LiberationSerif-Bold.ttf', i: 'LiberationSerif-Italic.ttf', bi: 'LiberationSerif-BoldItalic.ttf' } },
+  courier: { css: 'EdCourier', files: { r: 'LiberationMono-Regular.ttf', b: 'LiberationMono-Bold.ttf', i: 'LiberationMono-Italic.ttf', bi: 'LiberationMono-BoldItalic.ttf' } },
+  calibri: { css: 'EdCalibri', files: { r: 'Carlito-Regular.ttf', b: 'Carlito-Bold.ttf', i: 'Carlito-Italic.ttf', bi: 'Carlito-BoldItalic.ttf' } },
+  cambria: { css: 'EdCambria', files: { r: 'Caladea-Regular.ttf', b: 'Caladea-Bold.ttf', i: 'Caladea-Italic.ttf', bi: 'Caladea-BoldItalic.ttf' } },
 };
+
+// Best available family for a PDF font name, e.g. "ABCDEF+Arial-BoldMT" -> arial.
+function matchFontFamily(name, generic) {
+  const n = String(name || '');
+  if (/arial|helvetica|arimo|liberation ?sans|nimbus ?sans/i.test(n)) return 'arial';
+  if (/times|tinos|liberation ?serif|nimbus ?rom/i.test(n)) return 'times';
+  if (/courier|cousine|liberation ?mono|nimbus ?mono/i.test(n)) return 'courier';
+  if (/calibri|carlito/i.test(n)) return 'calibri';
+  if (/cambria|caladea/i.test(n)) return 'cambria';
+  if (/mono|consol/i.test(n) || /monospace/.test(generic)) return 'mono';
+  if ((/serif|georgia|garamond|roman|minion|palatino|book ?antiqua/i.test(n) && !/sans/i.test(n)) || generic === 'serif') return 'serif';
+  return 'sans';
+}
 
 // Scripts the main families don't cover, in priority order. Only downloaded when text needs them.
 const FALLBACK_FONTS = [

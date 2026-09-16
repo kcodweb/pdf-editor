@@ -61,9 +61,17 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
     page.setRotation(degrees((p.rot0 + p.rot) % 360));
     const index = state.pages.indexOf(p);
     const decor = decorItems(p, index, total);
-    if (p.annots.length || decor.length) isolatePageContent(out, page);
+    const ocrText = state.ocr[ocrKey(p)] ? await readableText(p, { includePdfText: false }) : [];
+    if (p.annots.length || decor.length || ocrText.length) isolatePageContent(out, page);
     if (p.annots.length) await drawAnnotations(out, page, p, fonts, images);
     if (decor.length) await drawDecor(out, page, p, decor, fonts);
+    if (ocrText.length) {
+      // Recognized text goes in as an invisible layer, making the scan searchable.
+      const Bh = p.baseH;
+      page.pushOperators(pushGraphicsState(), concatTransformationMatrix(...pageFrame(page, p, p.rot0 % 360)));
+      await drawHiddenText(out, page, ocrText, fonts, (it) => ({ x: it.x, y: Bh - it.baseline, angle: 0 }));
+      page.pushOperators(popGraphicsState());
+    }
     added.push(page);
   }
 
@@ -89,6 +97,66 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
   }
   if (opts.compress && opts.compress !== 'none') await compressImages(out, opts.compress);
   return out.save({ updateFieldAppearances: false });
+}
+
+/* ---------------- permanent removal ---------------- */
+
+const SECURE_DPI = 200;
+
+// Pages whose covered content must really be gone: always for redactions; with the privacy
+// option, also for white-out and edited text.
+const needsSecure = (p, all) => p.annots.some((a) => (a.type === 'rect' && (a.kind === 'redact' || (all && a.kind === 'whiteout')))
+  || (all && a.type === 'text' && a.cover));
+
+// Builds the PDF, then replaces pages that need it with an image of the finished page plus an
+// invisible layer of the text that is still visible — so nothing hidden survives in the file.
+async function buildFinalPdf(pages, opts = {}, ctx = createExportContext()) {
+  const secure = pages.map((p, i) => (needsSecure(p, !!opts.secure) ? i : -1)).filter((i) => i >= 0);
+  if (!secure.length) return buildPdf(pages, opts, ctx);
+
+  // Form fields on replaced pages would point at deleted widgets, so answers are flattened first.
+  const bytes = await buildPdf(pages, { ...opts, flatten: true, compress: 'none' }, ctx);
+  const out = await PDFDocument.load(bytes);
+  out.registerFontkit(fontkit);
+  const rendered = await pdfjsLib.getDocument({ data: bytes.slice(), cMapUrl: `${PDFJS_CDN}cmaps/`, cMapPacked: true, standardFontDataUrl: `${PDFJS_CDN}standard_fonts/` }).promise;
+  const fonts = new Map();
+  try {
+    for (const i of secure) {
+      $('hint').textContent = `Removing hidden content… page ${secure.indexOf(i) + 1} of ${secure.length}`;
+      const p = pages[i];
+      const page = await rendered.getPage(i + 1);
+      const vp = page.getViewport({ scale: SECURE_DPI / 72 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(vp.width);
+      canvas.height = Math.round(vp.height);
+      const c2d = canvas.getContext('2d');
+      c2d.fillStyle = '#fff';
+      c2d.fillRect(0, 0, canvas.width, canvas.height);
+      // 'print' intent renders without waiting for animation frames, so it also works in a background tab.
+      await page.render({ canvasContext: c2d, viewport: vp, intent: 'print' }).promise;
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+      canvas.width = canvas.height = 0;
+      const image = await out.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+
+      const { w, h } = pageDims(p);
+      const flat = out.insertPage(i, [w, h]);
+      flat.drawImage(image, { x: 0, y: 0, width: w, height: h });
+      // Keep what's still visible searchable. Map base frame -> displayed page (y up).
+      const m = rotMatrix(p.rot, p.baseW, p.baseH);
+      const angle = (Math.atan2(-m[1], m[0]) * 180) / Math.PI;
+      const items = await readableText(p);
+      await drawHiddenText(out, flat, items, fonts, (it) => ({
+        x: m[0] * it.x + m[2] * it.baseline + m[4],
+        y: h - (m[1] * it.x + m[3] * it.baseline + m[5]),
+        angle,
+      }));
+      out.removePage(i + 1);
+    }
+  } finally {
+    rendered.destroy();
+  }
+  if (opts.compress && opts.compress !== 'none') await compressImages(out, opts.compress);
+  return out.save();
 }
 
 const isWidget = (dict) => dict instanceof PDFLib.PDFDict
@@ -231,8 +299,8 @@ async function drawTextLine(out, page, fonts, text, o) {
     // Fallback script fonts have no italic face, so skew them like the browser does.
     if (o.italic && (o.synthItalic || run.file !== o.file)) opts.ySkew = degrees(12);
     page.drawText(run.text, opts);
-    x += ux * width;
-    y += uy * width;
+    x += ux * width * (o.advanceScale || 1);
+    y += uy * width * (o.advanceScale || 1);
   }
 }
 
@@ -263,13 +331,18 @@ async function drawAnnotations(out, page, p, fonts, images) {
         const c = a.cover;
         page.drawRectangle({ x: c.x, y: Bh - c.y - c.h, width: c.w, height: c.h, color: hexToRgb(c.fill) });
       }
-      const { file, synthItalic } = faceFile(a.font, a.bold, a.italic);
+      const orig = originalFontOnPage(page, a);
+      const { file, synthItalic } = faceFile(effectiveFamily(a), a.bold, a.italic);
       const lines = a.text.replace(/\r/g, '').replace(/\t/g, '    ').split('\n');
       for (let i = 0; i < lines.length; i++) {
-        await drawTextLine(out, page, fonts, lines[i], {
-          x: a.x, y: Bh - (a.y + a.size * (0.8 + 1.2 * i)), size: a.size, color: hexToRgb(a.color),
-          file, italic: a.italic, synthItalic,
-        });
+        const y = Bh - (a.y + a.size * (0.8 + 1.2 * i));
+        if (orig) {
+          drawWithOriginalFont(page, orig, lines[i], a.x, y, a.size, a.color);
+        } else {
+          await drawTextLine(out, page, fonts, lines[i], {
+            x: a.x, y, size: a.size, color: hexToRgb(a.color), file, italic: a.italic, synthItalic,
+          });
+        }
       }
     } else if (a.type === 'ink') {
       page.drawSvgPath(inkPath(a.points), {
@@ -282,6 +355,8 @@ async function drawAnnotations(out, page, p, fonts, images) {
         page.drawRectangle({ ...box, color: hexToRgb(a.color), opacity: 0.4, blendMode: BlendMode ? BlendMode.Multiply : undefined });
       } else if (a.kind === 'whiteout') {
         page.drawRectangle({ ...box, color: hexToRgb(a.fill || '#ffffff') });
+      } else if (a.kind === 'redact') {
+        page.drawRectangle({ ...box, color: rgb(0, 0, 0) });
       } else if (a.kind === 'ellipse') {
         page.drawEllipse({ x: a.x + a.w / 2, y: Bh - a.y - a.h / 2, xScale: a.w / 2, yScale: a.h / 2, borderColor: hexToRgb(a.color), borderWidth: a.width });
       } else {
@@ -325,6 +400,58 @@ async function drawAnnotations(out, page, p, fonts, images) {
   }
   page.pushOperators(popGraphicsState());
   for (const a of notes) addCommentAnnotation(out, page, a, m, Bh);
+}
+
+// The original font resource, if this exported page still has it and it can draw every character.
+function originalFontOnPage(page, a) {
+  const info = origFontState(a);
+  if (!info) return null;
+  const { PDFName, PDFDict } = PDFLib;
+  const resources = page.node.Resources();
+  const fonts = resources && resources.lookupMaybe(PDFName.of('Font'), PDFDict);
+  return fonts && fonts.has(PDFName.of(info.res)) ? info : null;
+}
+
+// Writes text as the original font's character codes, so it looks exactly like the rest of the page.
+function drawWithOriginalFont(page, info, text, x, y, size, color) {
+  if (!text) return;
+  const { PDFHexString, beginText, endText, setFontAndSize, setTextMatrix, showText, setFillingRgbColor } = PDFLib;
+  const n = parseInt(color.slice(1), 16);
+  const hex = [...text].map((ch) => info.codeFor.get(ch).toString(16).padStart(info.two ? 4 : 2, '0')).join('');
+  page.pushOperators(
+    pushGraphicsState(),
+    setFillingRgbColor(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255),
+    beginText(),
+    setFontAndSize(info.res, size),
+    setTextMatrix(1, 0, 0, 1, x, y),
+    showText(PDFHexString.of(hex)),
+    endText(),
+    popGraphicsState(),
+  );
+}
+
+// Invisible text (rendering mode 3) stretched over where words appear, so pages stay
+// searchable and copyable: used for OCR results and for pages converted to images.
+// `place` maps a base-frame item to { x, y, angle } in the current drawing frame (y up).
+async function drawHiddenText(out, page, items, fonts, place) {
+  const { PDFOperator, PDFNumber } = PDFLib;
+  const file = FONT_FAMILIES.sans.files.r;
+  for (const it of items) {
+    let natural = 0;
+    for (const run of await splitRuns(it.text, file)) {
+      natural += (await pdfFont(out, run.file, fonts)).widthOfTextAtSize(run.text, it.size);
+    }
+    if (natural <= 0 || it.w <= 0) continue;
+    const stretch = it.w / natural;
+    const { x, y, angle } = place(it);
+    page.pushOperators(
+      pushGraphicsState(),
+      PDFOperator.of('Tr', [PDFNumber.of(3)]),
+      PDFOperator.of('Tz', [PDFNumber.of(Math.round(stretch * 10000) / 100)]),
+    );
+    await drawTextLine(out, page, fonts, it.text, { x, y, size: it.size, color: rgb(0, 0, 0), file, angle, advanceScale: stretch });
+    page.pushOperators(popGraphicsState());
+  }
 }
 
 // Comments become real PDF "sticky note" annotations that other viewers show as pop-ups.
@@ -464,10 +591,12 @@ async function runDownload(pages, filename, opts = {}) {
   busy(true, 'Building PDF…');
   try {
     const warnings = [];
-    const bytes = await buildPdf(pages, { ...opts, warnings });
+    const bytes = await buildFinalPdf(pages, { ...opts, warnings });
     saveBlob(new Blob([bytes], { type: 'application/pdf' }), filename);
     if (pages === state.pages) dirty = false;
     let msg = `Downloaded ${filename} (${formatBytes(bytes.length)})`;
+    const secured = pages.filter((p) => needsSecure(p, !!opts.secure)).length;
+    if (secured) msg += ` — hidden content was permanently removed from ${secured} page${secured === 1 ? '' : 's'}`;
     if (opts.compress && opts.compress !== 'none') {
       const original = state.sources.reduce((sum, s) => sum + s.bytes.length, 0);
       if (original) msg += ` — originals were ${formatBytes(original)}`;
@@ -487,6 +616,14 @@ function openDownloadDialog() {
   finishEdit();
   $('dlName').value = `${state.fileName}-edited`;
   $('dlFormsSet').hidden = !state.sources.some((s) => s.hasForm);
+  const hasCovers = state.pages.some((p) => needsSecure(p, true));
+  const hasRedactions = state.pages.some((p) => needsSecure(p, false));
+  $('dlSecureSet').hidden = !hasCovers;
+  $('dlSecure').disabled = hasRedactions;
+  if (hasRedactions) $('dlSecure').checked = true;
+  $('dlSecureLabel').innerHTML = hasRedactions
+    ? '<b>Permanently remove covered text</b> — always on because this document has redactions. Pages with redactions (and, when on, white-out or edited text) become images, so hidden words can\'t be recovered. Other text on them stays searchable.'
+    : '<b>Permanently remove covered text</b> — pages with white-out or edited text become images, so the hidden words can\'t be copied or recovered. Their other text stays searchable.';
   openModal('dlModal');
   $('dlName').select();
 }
@@ -559,7 +696,7 @@ async function runSplit(parts) {
     const ctx = createExportContext();
     for (let i = 0; i < parts.length; i++) {
       $('hint').textContent = `Splitting… part ${i + 1} of ${parts.length}`;
-      const bytes = await buildPdf(parts[i].map((idx) => state.pages[idx]), {}, ctx);
+      const bytes = await buildFinalPdf(parts[i].map((idx) => state.pages[idx]), {}, ctx);
       zip.file(`${String(i + 1).padStart(2, '0')}-${state.fileName}-p${pagesLabel(parts[i])}.pdf`, bytes);
     }
     const blob = await zip.generateAsync({ type: 'blob' });
@@ -607,7 +744,7 @@ async function runImageExport(pages, format, dpi) {
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(vp.width);
       canvas.height = Math.round(vp.height);
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, intent: 'print' }).promise;
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, `image/${format}`, 0.92));
       const n = String(state.pages.indexOf(pages[i]) + 1).padStart(digits, '0');
       files.push({ name: `${state.fileName}-page-${n}.${ext}`, blob });
@@ -640,6 +777,7 @@ function initExportDialogs() {
     runDownload(state.pages, `${name}.pdf`, {
       flatten: document.querySelector('input[name=dlForms]:checked').value === 'flatten',
       compress: document.querySelector('input[name=dlCompress]:checked').value,
+      secure: $('dlSecure').checked,
     });
   });
 
