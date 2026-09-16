@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached on install; fonts and pdf.js character maps are
 // cached the first time they're used. Bump VERSION when shipping changes to the app shell.
-const VERSION = 'pdf-editor-v2';
+const VERSION = 'pdf-editor-v3';
 
 const APP_SHELL = [
   './',
@@ -9,6 +9,8 @@ const APP_SHELL = [
   'app.js',
   'fonts.js',
   'forms.js',
+  'textlayer.js',
+  'decor.js',
   'export.js',
   'signature.js',
   'vendor/pdf.min.js',

@@ -20,15 +20,30 @@ const isTyping = (el) => !!(el && el.closest && el.closest('input, textarea, sel
 
 const TOOL_HINTS = {
   select: 'Click to select. Drag to move, drag the corner to resize, double-click text to edit. Arrows nudge · Ctrl+C/V copy & paste · Ctrl+D duplicate.',
+  edittext: 'Click a line of text in the PDF to change it, or drag across text to select and copy it. Deleting an edited line brings the original back.',
   text: 'Click on a page to add text. Click outside or press Esc to finish.',
   draw: 'Drag on a page to draw freehand.',
   highlight: 'Drag over an area to highlight it.',
-  rect: 'Drag to draw a box outline.',
+  shape: 'Drag to draw. Hold Shift for straight lines at 45° steps.',
   whiteout: 'Drag over content to cover it with white.',
+  note: 'Click to pin a comment. Other PDF viewers show it as a sticky note.',
+  stamp: 'Pick a stamp in the toolbar, then click where it goes.',
   image: 'Click on a page where the image should go. You can also paste an image with Ctrl+V.',
   sign: 'Click on a page where your signature should go.',
 };
-const RECT_KINDS = { highlight: 'highlight', rect: 'outline', whiteout: 'whiteout' };
+const RECT_KINDS = { highlight: 'highlight', whiteout: 'whiteout' };
+const NOTE_SIZE = 22;
+
+const STAMPS = {
+  approved: { label: 'APPROVED', color: '#15803d' },
+  draft: { label: 'DRAFT', color: '#475569' },
+  confidential: { label: 'CONFIDENTIAL', color: '#b91c1c' },
+  rejected: { label: 'REJECTED', color: '#b91c1c' },
+  paid: { label: 'PAID', color: '#1d4ed8' },
+  received: { label: 'RECEIVED', color: '#7c3aed', date: true },
+  date: { label: '', color: '#1d4ed8', date: true },
+  custom: { label: '', color: '#b91c1c' },
+};
 
 /*
  * Coordinates: every annotation lives in the page's "base frame" — PDF points,
@@ -43,10 +58,13 @@ const state = {
   forms: {},        // form answers changed by the user (see forms.js)
   formDefaults: {}, // answers already in the file
   formOptions: {},  // choice field options, for export
+  decor: null,      // page numbers, headers, watermark (see decor.js)
   tool: 'select',
-  colors: { text: '#111827', draw: '#e11d48', highlight: '#facc15', rect: '#2563eb', sign: '#1e3a8a' },
-  sizes: { text: 16, draw: 3, rect: 2 },
+  colors: { text: '#111827', draw: '#e11d48', highlight: '#facc15', shape: '#2563eb', note: '#fde047', sign: '#1e3a8a' },
+  sizes: { text: 16, draw: 3, shape: 2 },
   textStyle: { font: 'sans', bold: false, italic: false },
+  shapeKind: 'rect',
+  stampKind: 'approved',
   zoom: 1.25,
   selected: null,   // { pageId, annotId }
   current: 0,
@@ -59,6 +77,7 @@ const redoStack = [];
 let dirty = false;
 let drag = null;
 let editing = null;
+let noteEditing = null;
 let pendingPlace = null;
 let styleSnap = null;
 let clip = null;
@@ -99,13 +118,20 @@ function busy(on, msg) {
   $('hint').textContent = on ? msg : (state.pages.length ? TOOL_HINTS[state.tool] : '');
 }
 
+const MODALS = ['sigModal', 'dlModal', 'splitModal', 'decorModal', 'imgModal', 'keysModal'];
 function openModal(id) {
   $(id).hidden = false;
 }
 function closeModal(id) {
   $(id).hidden = true;
 }
-const openModalId = () => ['sigModal', 'dlModal', 'splitModal'].find((id) => !$(id).hidden);
+const openModalId = () => MODALS.find((id) => !$(id).hidden);
+// Some dialogs need to undo things when dismissed.
+function dismissModal(id) {
+  if (id === 'sigModal') closeSignature();
+  else if (id === 'decorModal') closeDecor(false);
+  else closeModal(id);
+}
 
 const measureCtx = document.createElement('canvas').getContext('2d');
 const fontCss = (a) => `${a.italic ? 'italic ' : ''}${a.bold ? 700 : 400} ${a.size}px ${cssFontStack(a.font)}`;
@@ -134,6 +160,63 @@ function inkPath(points) {
   return points.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`).join(' ');
 }
 
+// Where a line's shaft ends and its arrowhead triangle sits (tip, left, right).
+function lineGeometry(a) {
+  const dx = a.x2 - a.x1;
+  const dy = a.y2 - a.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  if (!a.arrow) return { end: [a.x2, a.y2], head: null };
+  const hl = Math.min(len, Math.max(10, a.width * 4));
+  const hw = hl * 0.5;
+  const bx = a.x2 - ux * hl;
+  const by = a.y2 - uy * hl;
+  return {
+    end: [a.x2 - ux * hl * 0.6, a.y2 - uy * hl * 0.6],
+    head: [[a.x2, a.y2], [bx - uy * hw, by + ux * hw], [bx + uy * hw, by - ux * hw]],
+  };
+}
+
+// Text sizes and baselines for a stamp box, shared by screen and export.
+function stampLayout(a) {
+  const two = !!(a.label && a.sub);
+  const main = a.label || a.sub;
+  const border = Math.max(1.5, a.h * 0.06);
+  const room = Math.max(1, a.w - a.h * 0.45);
+  const perPt = (text, bold) => Math.max(0.01, textWidth(text, { font: 'sans', bold, size: 100 }) / 100);
+  const size = Math.min(a.h * (two ? 0.4 : 0.52), room / perPt(main, true));
+  const subSize = two ? Math.min(a.h * 0.22, room / perPt(a.sub, false)) : 0;
+  return {
+    two, main, size, subSize, border,
+    mainBaseline: two ? a.y + a.h * 0.52 : a.y + a.h / 2 + size * 0.36,
+    subBaseline: a.y + a.h * 0.83,
+  };
+}
+
+function makeStamp() {
+  const preset = STAMPS[state.stampKind] || STAMPS.approved;
+  const today = todayText();
+  let label = preset.label;
+  let sub = preset.date ? today : '';
+  if (state.stampKind === 'date') { label = today; sub = ''; }
+  if (state.stampKind === 'custom') {
+    label = $('stampText').value.trim();
+    if (!label) {
+      toast('Type the stamp text in the toolbar first.');
+      $('stampText').focus();
+      return null;
+    }
+  }
+  const h = sub ? 58 : 44;
+  const probe = { font: 'sans', bold: true, size: 100 };
+  const w = Math.max(
+    (textWidth(label, probe) / 100) * h * (sub ? 0.4 : 0.52),
+    sub ? (textWidth(sub, { ...probe, bold: false }) / 100) * h * 0.22 : 0,
+  ) + h * 0.8;
+  return { id: uid(), type: 'stamp', x: 0, y: 0, w, h, label, sub, color: preset.color };
+}
+
 function annotBounds(a) {
   switch (a.type) {
     case 'text': {
@@ -149,6 +232,14 @@ function annotBounds(a) {
       const y = Math.min(...ys) - pad;
       return { x, y, w: Math.max(...xs) + pad - x, h: Math.max(...ys) + pad - y };
     }
+    case 'line': {
+      const pad = a.arrow ? Math.max(10, a.width * 4) * 0.5 : a.width / 2;
+      const x = Math.min(a.x1, a.x2) - pad;
+      const y = Math.min(a.y1, a.y2) - pad;
+      return { x, y, w: Math.abs(a.x2 - a.x1) + pad * 2, h: Math.abs(a.y2 - a.y1) + pad * 2 };
+    }
+    case 'note':
+      return { x: a.x, y: a.y, w: NOTE_SIZE, h: NOTE_SIZE };
     default:
       return { x: a.x, y: a.y, w: a.w, h: a.h };
   }
@@ -156,6 +247,7 @@ function annotBounds(a) {
 
 function translateAnnot(a, orig, dx, dy) {
   if (a.type === 'ink') a.points = orig.points.map(([x, y]) => [x + dx, y + dy]);
+  else if (a.type === 'line') Object.assign(a, { x1: orig.x1 + dx, y1: orig.y1 + dy, x2: orig.x2 + dx, y2: orig.y2 + dy });
   else { a.x = orig.x + dx; a.y = orig.y + dy; }
 }
 
@@ -163,8 +255,16 @@ function basePoint(svg, e) {
   const pt = svg.createSVGPoint();
   pt.x = e.clientX;
   pt.y = e.clientY;
-  const r = pt.matrixTransform(svg.firstChild.getScreenCTM().inverse());
+  const r = pt.matrixTransform(svg.querySelector('g.root').getScreenCTM().inverse());
   return { x: r.x, y: r.y };
+}
+
+// Base-frame point -> position inside the page element (pixels).
+function pagePoint(el, x, y) {
+  const pt = el.querySelector('svg.overlay').createSVGPoint();
+  pt.x = x;
+  pt.y = y;
+  return pt.matrixTransform(el.querySelector('g.root').getCTM());
 }
 
 // Center of the visible part of a page, in its base frame.
@@ -180,7 +280,7 @@ function visibleCenter(p) {
 
 /* ---------------- history ---------------- */
 
-const snapshot = () => JSON.stringify({ pages: state.pages, forms: state.forms });
+const snapshot = () => JSON.stringify({ pages: state.pages, forms: state.forms, decor: state.decor });
 
 function pushHistory(snap = snapshot()) {
   undoStack.push(snap);
@@ -194,6 +294,7 @@ function restore(snap) {
   const s = JSON.parse(snap);
   state.pages = s.pages;
   state.forms = s.forms || {};
+  state.decor = s.decor || null;
   state.selected = null;
   dirty = true;
   renderAll();
@@ -213,10 +314,47 @@ function redo() {
   restore(redoStack.pop());
 }
 
-/* ---------------- loading ---------------- */
+/* ---------------- opening files ---------------- */
+
+const isPdfFile = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+const isImageFile = (f) => f.type.startsWith('image/');
+
+function resetDocument(fileName) {
+  finishEdit();
+  if (!$('searchbar').hidden) closeSearch();
+  state.sources.forEach((s) => s.pdf.destroy());
+  Object.assign(state, {
+    sources: [], pages: [], images: {}, forms: {}, formDefaults: {}, formOptions: {}, decor: null,
+    selected: null, current: 0, pageSel: new Set(), fileName,
+  });
+  undoStack.length = 0;
+  redoStack.length = 0;
+  thumbCache.clear();
+  widgetCache.clear();
+  lineCache.clear();
+  clip = null;
+  pagesEl.replaceChildren();
+  dirty = false;
+}
+
+// Opens or appends any mix of PDFs and images. `replace` starts a new document.
+async function openFiles(files, replace) {
+  const pdfs = files.filter(isPdfFile);
+  const images = files.filter((f) => !isPdfFile(f) && isImageFile(f));
+  if (!pdfs.length && !images.length) {
+    toast('Choose PDF or image files.');
+    return;
+  }
+  if (replace && dirty && state.pages.length && !confirm('Open a new file? Your unsaved edits will be lost.')) return;
+  if (pdfs.length) {
+    const opened = await loadPdfFiles(replace ? pdfs.slice(0, 1) : pdfs, replace);
+    if (opened) replace = false;
+    if (pdfs.length > 1 && state.pages.length) await loadPdfFiles(pdfs.slice(1), false);
+  }
+  if (images.length) await addImagePages(images, replace);
+}
 
 async function loadPdfFiles(files, replace) {
-  if (replace && dirty && state.pages.length && !confirm('Open a new file? Your unsaved edits will be lost.')) return;
   busy(true, 'Opening…');
   try {
     const loaded = [];
@@ -247,26 +385,10 @@ async function loadPdfFiles(files, replace) {
       }
       loaded.push({ file, bytes, pdf, pages, hasForm });
     }
-    if (!loaded.length) return;
+    if (!loaded.length) return false;
 
-    if (replace) {
-      finishEdit();
-      state.sources.forEach((s) => s.pdf.destroy());
-      Object.assign(state, {
-        sources: [], pages: [], images: {}, forms: {}, formDefaults: {}, formOptions: {},
-        selected: null, current: 0, pageSel: new Set(),
-        fileName: loaded[0].file.name.replace(/\.pdf$/i, '') || 'document',
-      });
-      undoStack.length = 0;
-      redoStack.length = 0;
-      thumbCache.clear();
-      widgetCache.clear();
-      clip = null;
-      pagesEl.replaceChildren();
-      dirty = false;
-    } else {
-      pushHistory();
-    }
+    if (replace) resetDocument(loaded[0].file.name.replace(/\.pdf$/i, '') || 'document');
+    else pushHistory();
 
     const firstNew = state.pages.length;
     for (const l of loaded) {
@@ -282,6 +404,45 @@ async function loadPdfFiles(files, replace) {
       const n = state.pages.length - firstNew;
       toast(`Added ${n} page${n === 1 ? '' : 's'}.`);
     }
+    return true;
+  } finally {
+    busy(false);
+  }
+}
+
+// Each image becomes a page (US Letter, turned to match the image) with the image centered.
+async function addImagePages(files, replace) {
+  busy(true, 'Adding images…');
+  try {
+    if (replace) resetDocument(files[0].name.replace(/\.[^.]+$/, '') || 'images');
+    const pages = [];
+    for (const file of files) {
+      try {
+        const imageId = await importImageFile(file);
+        const im = state.images[imageId];
+        const landscape = im.w > im.h;
+        const W = landscape ? 792 : 612;
+        const H = landscape ? 612 : 792;
+        const margin = 24;
+        const s = Math.min((W - margin * 2) / im.w, (H - margin * 2) / im.h);
+        const w = im.w * s;
+        const h = im.h * s;
+        pages.push({
+          id: uid(), src: null, index: 0, baseW: W, baseH: H, rot0: 0, rot: 0,
+          annots: [{ id: uid(), type: 'image', imageId, x: (W - w) / 2, y: (H - h) / 2, w, h }],
+        });
+      } catch {
+        toast(`"${file.name}" couldn't be read as an image.`);
+      }
+    }
+    if (!pages.length) { renderAll(); return; }
+    if (!replace) pushHistory();
+    const first = state.pages.length;
+    state.pages.push(...pages);
+    dirty = true;
+    renderAll();
+    if (!replace) scrollToPage(state.pages[first].id);
+    toast(`Added ${pages.length} image page${pages.length === 1 ? '' : 's'}.`);
   } finally {
     busy(false);
   }
@@ -321,6 +482,7 @@ function renderAll() {
   state.current = clamp(state.current, 0, Math.max(0, state.pages.length - 1));
   renderThumbs();
   updateUI();
+  if (!$('searchbar').hidden && search.query.trim()) runSearch(search.query);
   requestAnimationFrame(() => { renderVisible(); updateCurrent(); });
 }
 
@@ -329,7 +491,7 @@ function createPageEl(p) {
   el.className = 'page';
   el.dataset.id = p.id;
   const svg = svgEl('svg', { class: 'overlay', 'data-id': p.id });
-  svg.appendChild(svgEl('g', { class: 'root' }));
+  svg.append(svgEl('g', { class: 'decor' }), svgEl('g', { class: 'root' }));
   el.append(document.createElement('canvas'), svg);
   return el;
 }
@@ -341,7 +503,9 @@ function sizePageEl(el, p) {
   const svg = el.querySelector('svg.overlay');
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   const m = rotMatrix(p.rot, p.baseW, p.baseH).map((v) => v * state.zoom);
-  svg.firstChild.setAttribute('transform', `matrix(${m.join(' ')})`);
+  svg.querySelector('g.root').setAttribute('transform', `matrix(${m.join(' ')})`);
+  svg.querySelector('g.decor').setAttribute('transform', `scale(${state.zoom})`);
+  sizeTextLayer(el, p);
 }
 
 function renderVisible() {
@@ -393,7 +557,8 @@ async function renderCanvas(el) {
     if (el.dataset.rendered !== key) return;
     canvas.width = off.width;
     canvas.height = off.height;
-    canvas.getContext('2d').drawImage(off, 0, 0);
+    canvas.getContext('2d', { willReadFrequently: true }).drawImage(off, 0, 0);
+    buildTextLayer(el, p);
   } catch (err) {
     if (!err || err.name !== 'RenderingCancelledException') console.error(err);
     if (el.dataset.rendered === key) el.dataset.rendered = '';
@@ -402,26 +567,35 @@ async function renderCanvas(el) {
 
 function renderOverlay(p) {
   const el = pageElOf(p.id);
+  const index = state.pages.indexOf(p);
   if (el) {
     const g = el.querySelector('g.root');
     g.replaceChildren();
     for (const a of p.annots) {
-      if (editing && editing.annotId === a.id) continue;
+      if (editing && editing.annotId === a.id) {
+        if (a.cover) g.appendChild(coverEl(a.cover));
+        continue;
+      }
       g.appendChild(annotEl(a));
     }
+    drawSearchHits(g, p);
     const sel = state.selected;
     if (sel && sel.pageId === p.id) {
       const a = findAnnot(p, sel.annotId);
       if (a) drawSelection(g, a);
     }
+    renderDecor(el.querySelector('g.decor'), p, index, state.pages.length);
   }
   renderThumbOverlay(p);
 }
+
+const coverEl = (c) => svgEl('rect', { class: 'cover', x: c.x, y: c.y, width: c.w, height: c.h, fill: c.fill });
 
 function annotEl(a) {
   const wrap = svgEl('g', { 'data-aid': a.id, class: `annot annot-${a.type}` });
   switch (a.type) {
     case 'text': {
+      if (a.cover) wrap.appendChild(coverEl(a.cover));
       const t = svgEl('text', {
         'font-size': a.size,
         fill: a.color,
@@ -450,10 +624,52 @@ function annotEl(a) {
       if (a.kind === 'highlight') {
         wrap.appendChild(svgEl('rect', { ...base, fill: a.color, 'fill-opacity': 0.4, style: 'mix-blend-mode:multiply' }));
       } else if (a.kind === 'whiteout') {
-        wrap.appendChild(svgEl('rect', { ...base, fill: '#fff' }));
+        wrap.appendChild(svgEl('rect', { ...base, fill: a.fill || '#fff' }));
+      } else if (a.kind === 'ellipse') {
+        wrap.appendChild(svgEl('ellipse', { cx: a.x + a.w / 2, cy: a.y + a.h / 2, rx: a.w / 2, ry: a.h / 2, fill: 'none', stroke: a.color, 'stroke-width': a.width }));
       } else {
         wrap.appendChild(svgEl('rect', { ...base, fill: 'none', stroke: a.color, 'stroke-width': a.width }));
       }
+      break;
+    }
+    case 'line': {
+      const geo = lineGeometry(a);
+      wrap.append(
+        svgEl('path', { d: `M${a.x1} ${a.y1}L${a.x2} ${a.y2}`, class: 'hit', fill: 'none', 'stroke-width': Math.max(a.width + 10, 14) }),
+        svgEl('path', { d: `M${a.x1} ${a.y1}L${geo.end[0]} ${geo.end[1]}`, fill: 'none', stroke: a.color, 'stroke-width': a.width, 'stroke-linecap': 'round' }),
+      );
+      if (geo.head) {
+        const [t, l, r] = geo.head;
+        wrap.appendChild(svgEl('path', { d: `M${t[0]} ${t[1]}L${l[0]} ${l[1]}L${r[0]} ${r[1]}Z`, fill: a.color }));
+      }
+      break;
+    }
+    case 'note': {
+      const s = NOTE_SIZE;
+      wrap.append(
+        svgEl('rect', { class: 'note-body', x: a.x + 0.5, y: a.y + 0.5, width: s - 1, height: s - 1, rx: 2.5, fill: a.color, stroke: 'rgba(0,0,0,.4)', 'stroke-width': 1 }),
+        svgEl('path', { d: `M${a.x + s * 0.22} ${a.y + s * 0.32}h${s * 0.56}M${a.x + s * 0.22} ${a.y + s * 0.5}h${s * 0.56}M${a.x + s * 0.22} ${a.y + s * 0.68}h${s * 0.38}`, stroke: 'rgba(0,0,0,.55)', 'stroke-width': 1.2, fill: 'none' }),
+      );
+      const title = svgEl('title');
+      title.textContent = a.text;
+      wrap.appendChild(title);
+      break;
+    }
+    case 'stamp': {
+      const s = stampLayout(a);
+      const cx = a.x + a.w / 2;
+      const text = (content, y, size, weight) => {
+        const t = svgEl('text', { x: cx, y, 'font-size': size, 'font-weight': weight, 'text-anchor': 'middle', fill: a.color, 'font-family': cssFontStack('sans') });
+        t.textContent = content;
+        return t;
+      };
+      wrap.setAttribute('opacity', 0.9);
+      wrap.appendChild(svgEl('rect', {
+        x: a.x + s.border / 2, y: a.y + s.border / 2, width: a.w - s.border, height: a.h - s.border, rx: a.h * 0.14,
+        fill: 'rgba(255,255,255,0.001)', stroke: a.color, 'stroke-width': s.border,
+      }));
+      if (s.main) wrap.appendChild(text(s.main, s.mainBaseline, s.size, 700));
+      if (s.two) wrap.appendChild(text(a.sub, s.subBaseline, s.subSize, 400));
       break;
     }
     case 'image': {
@@ -467,16 +683,22 @@ function annotEl(a) {
 
 function drawSelection(g, a) {
   const z = state.zoom;
+  const s = 10 / z;
+  const handle = (x, y, end) => g.appendChild(svgEl('rect', {
+    class: end ? 'handle end' : 'handle', 'data-end': end, x: x - s / 2, y: y - s / 2, width: s, height: s, 'stroke-width': 1.5 / z,
+  }));
+  if (a.type === 'line') {
+    handle(a.x1, a.y1, '1');
+    handle(a.x2, a.y2, '2');
+    return;
+  }
   const b = annotBounds(a);
   const pad = 4 / z;
   g.appendChild(svgEl('rect', {
     class: 'sel-box', x: b.x - pad, y: b.y - pad, width: b.w + pad * 2, height: b.h + pad * 2,
     'stroke-width': 1.5 / z, 'stroke-dasharray': `${5 / z} ${3 / z}`,
   }));
-  const s = 10 / z;
-  g.appendChild(svgEl('rect', {
-    class: 'handle', x: b.x + b.w + pad - s / 2, y: b.y + b.h + pad - s / 2, width: s, height: s, 'stroke-width': 1.5 / z,
-  }));
+  if (a.type !== 'note') handle(b.x + b.w + pad, b.y + b.h + pad);
 }
 
 /* ---------------- thumbnails ---------------- */
@@ -523,7 +745,7 @@ function renderThumbs() {
       <div class="thumb-page" style="width:${Math.min(150, (170 * w) / h)}px;aspect-ratio:${w}/${h}"><img alt=""></div>
       <div class="num">${i + 1}</div>`;
     const svg = svgEl('svg', { class: 'thumb-overlay', viewBox: `0 0 ${w} ${h}` });
-    svg.appendChild(svgEl('g', { transform: `matrix(${rotMatrix(p.rot, p.baseW, p.baseH).join(' ')})` }));
+    svg.append(svgEl('g', { class: 'decor' }), svgEl('g', { class: 'root', transform: `matrix(${rotMatrix(p.rot, p.baseW, p.baseH).join(' ')})` }));
     item.querySelector('.thumb-page').appendChild(svg);
     const img = item.querySelector('img');
     getThumb(p).then((url) => { img.src = url; }).catch(() => {});
@@ -534,7 +756,9 @@ function renderThumbs() {
 }
 
 function renderThumbOverlay(p, svg = thumbsEl.querySelector(`.thumb[data-id="${p.id}"] svg`)) {
-  if (svg) svg.firstChild.replaceChildren(...p.annots.map(annotEl));
+  if (!svg) return;
+  svg.querySelector('g.root').replaceChildren(...p.annots.map(annotEl));
+  renderDecor(svg.querySelector('g.decor'), p, state.pages.indexOf(p), state.pages.length);
 }
 
 function refreshThumbState() {
@@ -738,6 +962,7 @@ function setTool(tool) {
   finishEdit();
   state.tool = tool;
   if (tool !== 'select') setSelected(null);
+  if (tool !== 'edittext') window.getSelection()?.removeAllRanges();
   updateUI();
 }
 
@@ -756,7 +981,7 @@ function styleTarget() {
     const noColor = a.type === 'image' || (a.type === 'rect' && a.kind === 'whiteout');
     let sizeProp = null;
     if (a.type === 'text') sizeProp = 'size';
-    else if (a.type === 'ink' || (a.type === 'rect' && a.kind === 'outline')) sizeProp = 'width';
+    else if (a.type === 'ink' || a.type === 'line' || (a.type === 'rect' && (a.kind === 'outline' || a.kind === 'ellipse'))) sizeProp = 'width';
     return { annot: a, color: noColor ? null : a.color, size: sizeProp ? a[sizeProp] : null, sizeProp, label: a.type === 'text' ? 'Font size' : 'Stroke' };
   }
   const t = state.tool;
@@ -788,6 +1013,11 @@ function updateStyleControls() {
     $('btnBold').setAttribute('aria-pressed', String(!!ts.bold));
     $('btnItalic').setAttribute('aria-pressed', String(!!ts.italic));
   }
+  $('shapeKinds').hidden = state.tool !== 'shape';
+  document.querySelectorAll('[data-shape]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.shape === state.shapeKind)));
+  $('stampOptions').hidden = state.tool !== 'stamp';
+  $('stampKind').value = state.stampKind;
+  $('stampText').hidden = state.stampKind !== 'custom';
 }
 
 function applyTextStyle(prop, value) {
@@ -838,6 +1068,16 @@ $('btnItalic').addEventListener('click', () => applyTextStyle('italic', !textSty
 // Keep focus in the text being typed when toggling bold/italic.
 for (const id of ['btnBold', 'btnItalic']) $(id).addEventListener('pointerdown', (e) => e.preventDefault());
 
+document.querySelectorAll('[data-shape]').forEach((b) => b.addEventListener('click', () => {
+  state.shapeKind = b.dataset.shape;
+  updateUI();
+}));
+$('stampKind').addEventListener('change', (e) => {
+  state.stampKind = e.target.value;
+  updateUI();
+  if (state.stampKind === 'custom') $('stampText').focus();
+});
+
 function deleteSelected() {
   const a = selectedAnnot();
   if (!a) return;
@@ -845,19 +1085,21 @@ function deleteSelected() {
   pushHistory();
   p.annots = p.annots.filter((x) => x !== a);
   setSelected(null);
+  if (a.cover) toast('Edit removed — the original text is back.');
 }
 
 function updateUI() {
   const has = state.pages.length > 0;
   document.body.classList.toggle('has-doc', has);
   $('empty').hidden = has;
-  for (const id of ['btnMerge', 'btnBlank', 'btnDownload', 'btnZoomIn', 'btnZoomOut', 'btnFit']) $(id).disabled = !has;
+  for (const id of ['btnMerge', 'btnBlank', 'btnDownload', 'btnZoomIn', 'btnZoomOut', 'btnFit', 'btnFind']) $(id).disabled = !has;
   $('btnUndo').disabled = !undoStack.length;
   $('btnRedo').disabled = !redoStack.length;
   $('btnDelete').disabled = !state.selected;
   $('btnDuplicate').disabled = !state.selected;
   $('zoomLabel').textContent = `${Math.round(state.zoom * 100)}%`;
   document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === state.tool));
+  document.querySelectorAll('[data-needs-doc]').forEach((b) => { b.disabled = !has; });
   viewer.className = `viewer tool-${state.tool}`;
   if (!document.body.classList.contains('busy')) $('hint').textContent = has ? TOOL_HINTS[state.tool] : '';
   if (!has) $('pageInfo').textContent = '';
@@ -867,26 +1109,27 @@ function updateUI() {
 /* ---------------- pointer interaction ---------------- */
 
 pagesEl.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0 || e.target.closest('.text-editor, .form-field')) return;
+  if (e.button !== 0 || e.target.closest('.text-editor, .form-field, .note-editor')) return;
   const svg = e.target.closest('svg.overlay');
-  if (editing) {
-    finishEdit();
-    if (state.tool === 'text') { e.preventDefault(); return; }
-  }
+  const hadEditor = !!(editing || noteEditing);
+  finishEdit();
+  if (hadEditor && (state.tool === 'text' || state.tool === 'note')) { e.preventDefault(); return; }
   if (!svg) return;
   const p = findPage(svg.dataset.id);
   const raw = basePoint(svg, e);
   const pt = { x: clamp(raw.x, 0, p.baseW), y: clamp(raw.y, 0, p.baseH) };
   const hitEl = e.target.closest('[data-aid]');
   const hit = hitEl ? findAnnot(p, hitEl.dataset.aid) : null;
+  const handleEl = e.target.closest('.handle');
   const tool = state.tool;
   e.preventDefault();
   if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
 
-  if (tool === 'select' || (tool === 'text' && e.target.closest('.handle'))) {
+  if (tool === 'select' || (handleEl && selectedAnnot())) {
     const sel = selectedAnnot();
-    if (e.target.closest('.handle') && sel) {
-      drag = { mode: 'resize', svg, p, a: sel, start: pt, orig: structuredClone(sel), ob: annotBounds(sel), snap: snapshot(), moved: false };
+    if (handleEl && sel) {
+      const mode = handleEl.dataset.end ? 'endpoint' : 'resize';
+      drag = { mode, end: handleEl.dataset.end, svg, p, a: sel, start: pt, orig: structuredClone(sel), ob: annotBounds(sel), snap: snapshot(), moved: false };
     } else if (hit) {
       setSelected({ pageId: p.id, annotId: hit.id });
       drag = { mode: 'move', svg, p, a: hit, start: raw, orig: structuredClone(hit), snap: snapshot(), moved: false };
@@ -911,9 +1154,37 @@ pagesEl.addEventListener('pointerdown', (e) => {
     const snap = snapshot();
     const a = { id: uid(), type: 'rect', kind: RECT_KINDS[tool], x: pt.x, y: pt.y, w: 0, h: 0 };
     if (tool === 'highlight') a.color = state.colors.highlight;
-    if (tool === 'rect') { a.color = state.colors.rect; a.width = state.sizes.rect; }
     p.annots.push(a);
     drag = { mode: 'rect', svg, p, a, start: pt, snap };
+  } else if (tool === 'shape') {
+    const snap = snapshot();
+    const kind = state.shapeKind;
+    const common = { id: uid(), width: state.sizes.shape, color: state.colors.shape };
+    const a = kind === 'line' || kind === 'arrow'
+      ? { ...common, type: 'line', x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y, arrow: kind === 'arrow' }
+      : { ...common, type: 'rect', kind: kind === 'ellipse' ? 'ellipse' : 'outline', x: pt.x, y: pt.y, w: 0, h: 0 };
+    p.annots.push(a);
+    drag = { mode: a.type === 'line' ? 'line' : 'rect', svg, p, a, start: pt, snap };
+  } else if (tool === 'note') {
+    if (hit && hit.type === 'note') { startNoteEdit(p, hit, false, snapshot()); return; }
+    const snap = snapshot();
+    const a = {
+      id: uid(), type: 'note', text: '', color: state.colors.note,
+      x: clamp(pt.x - NOTE_SIZE / 2, 0, p.baseW - NOTE_SIZE), y: clamp(pt.y - NOTE_SIZE / 2, 0, p.baseH - NOTE_SIZE),
+    };
+    p.annots.push(a);
+    startNoteEdit(p, a, true, snap);
+    return;
+  } else if (tool === 'stamp') {
+    const a = makeStamp();
+    if (!a) return;
+    a.x = clamp(pt.x - a.w / 2, 0, Math.max(0, p.baseW - a.w));
+    a.y = clamp(pt.y - a.h / 2, 0, Math.max(0, p.baseH - a.h));
+    pushHistory();
+    p.annots.push(a);
+    setTool('select');
+    setSelected({ pageId: p.id, annotId: a.id });
+    return;
   } else if (tool === 'image') {
     pendingPlace = { pageId: p.id, pt };
     $('fileImage').value = '';
@@ -923,10 +1194,19 @@ pagesEl.addEventListener('pointerdown', (e) => {
     pendingPlace = { pageId: p.id, pt };
     openSignature();
     return;
+  } else {
+    return;
   }
   svg.setPointerCapture(e.pointerId);
   renderOverlay(p);
 });
+
+// Shift-drag snaps a line to 45° steps.
+function snapAngle(x1, y1, x2, y2) {
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  const angle = Math.round(Math.atan2(y2 - y1, x2 - x1) / (Math.PI / 4)) * (Math.PI / 4);
+  return [x1 + Math.cos(angle) * len, y1 + Math.sin(angle) * len];
+}
 
 window.addEventListener('pointermove', (e) => {
   if (!drag) return;
@@ -946,10 +1226,10 @@ window.addEventListener('pointermove', (e) => {
       const { a, orig, ob } = drag;
       const dx = pt.x - drag.start.x;
       const dy = pt.y - drag.start.y;
-      if (a.type === 'rect' || a.type === 'image') {
+      if (a.type === 'rect' || a.type === 'image' || a.type === 'stamp') {
         let w = Math.max(4, orig.w + dx);
         let h = Math.max(4, orig.h + dy);
-        if (a.type === 'image' && !e.shiftKey) {
+        if ((a.type === 'image' || a.type === 'stamp') && !e.shiftKey) {
           const ratio = orig.w / orig.h;
           if (w / h > ratio) h = w / ratio; else w = h * ratio;
         }
@@ -964,6 +1244,21 @@ window.addEventListener('pointermove', (e) => {
         a.points = orig.points.map(([x, y]) => [ob.x + (x - ob.x) * sx, ob.y + (y - ob.y) * sy]);
       }
       drag.moved = true;
+      break;
+    }
+    case 'endpoint': {
+      const { a, end } = drag;
+      const other = end === '1' ? [a.x2, a.y2] : [a.x1, a.y1];
+      const [x, y] = e.shiftKey ? snapAngle(other[0], other[1], pt.x, pt.y) : [pt.x, pt.y];
+      a[`x${end}`] = x;
+      a[`y${end}`] = y;
+      drag.moved = true;
+      break;
+    }
+    case 'line': {
+      const [x, y] = e.shiftKey ? snapAngle(drag.a.x1, drag.a.y1, pt.x, pt.y) : [pt.x, pt.y];
+      drag.a.x2 = x;
+      drag.a.y2 = y;
       break;
     }
     case 'draw':
@@ -982,7 +1277,8 @@ function endDrag() {
   if (!drag) return;
   const d = drag;
   drag = null;
-  if (d.mode === 'move' || d.mode === 'resize') {
+  const drop = () => { d.p.annots = d.p.annots.filter((x) => x !== d.a); };
+  if (d.mode === 'move' || d.mode === 'resize' || d.mode === 'endpoint') {
     if (d.moved) pushHistory(d.snap);
   } else if (d.mode === 'draw') {
     if (d.a.points.length === 1) {
@@ -991,7 +1287,10 @@ function endDrag() {
     }
     pushHistory(d.snap);
   } else if (d.mode === 'rect') {
-    if (d.a.w * state.zoom < 4 || d.a.h * state.zoom < 4) d.p.annots = d.p.annots.filter((x) => x !== d.a);
+    if (d.a.w * state.zoom < 4 || d.a.h * state.zoom < 4) drop();
+    else pushHistory(d.snap);
+  } else if (d.mode === 'line') {
+    if (Math.hypot(d.a.x2 - d.a.x1, d.a.y2 - d.a.y1) * state.zoom < 4) drop();
     else pushHistory(d.snap);
   }
   renderOverlay(d.p);
@@ -1007,6 +1306,7 @@ pagesEl.addEventListener('dblclick', (e) => {
   const p = findPage(svg.dataset.id);
   const a = findAnnot(p, hitEl.dataset.aid);
   if (a && a.type === 'text') startEdit(p, a, false, snapshot());
+  if (a && a.type === 'note') startNoteEdit(p, a, false, snapshot());
 });
 
 /* ---------------- text editing ---------------- */
@@ -1018,6 +1318,7 @@ function styleEditor(ta, a) {
     fontWeight: a.bold ? 700 : 400,
     fontStyle: a.italic ? 'italic' : 'normal',
     color: a.color,
+    background: a.cover ? a.cover.fill : '',
   });
   const lines = ta.value.split('\n');
   const w = Math.max(...lines.map((l) => textWidth(l, a)));
@@ -1031,11 +1332,7 @@ function startEdit(p, a, isNew, snap) {
   renderOverlay(p);
 
   const el = pageElOf(p.id);
-  const svgPt = el.querySelector('svg').createSVGPoint();
-  svgPt.x = a.x;
-  svgPt.y = a.y - a.size * 0.2;
-  const at = svgPt.matrixTransform(el.querySelector('g.root').getCTM());
-
+  const at = pagePoint(el, a.x, a.y - a.size * 0.2);
   const ta = document.createElement('textarea');
   ta.className = 'text-editor';
   ta.spellcheck = false;
@@ -1059,10 +1356,14 @@ function startEdit(p, a, isNew, snap) {
   el.appendChild(ta);
   editing.ta = ta;
   updateUI();
-  requestAnimationFrame(() => ta.focus());
+  requestAnimationFrame(() => {
+    ta.focus();
+    if (a.cover && isNew) ta.select();
+  });
 }
 
 function finishEdit() {
+  closeNoteEditor();
   if (!editing) return;
   const ed = editing;
   editing = null;
@@ -1071,14 +1372,81 @@ function finishEdit() {
   if (!p) return;
   const a = findAnnot(p, ed.annotId);
   if (a) {
-    if (!a.text.trim()) {
+    const unchanged = a.text === ed.original && !ed.styleChanged;
+    if (a.cover && ed.isNew && unchanged) {
+      // Opened an existing line but didn't change anything: leave the page untouched.
       p.annots = p.annots.filter((x) => x !== a);
-      if (!ed.isNew) pushHistory(ed.snap);
+    } else if (!a.text.trim()) {
+      const i = p.annots.indexOf(a);
+      if (a.cover) {
+        // Emptying an existing line erases it.
+        p.annots.splice(i, 1, { id: a.id, type: 'rect', kind: 'whiteout', x: a.cover.x, y: a.cover.y, w: a.cover.w, h: a.cover.h, fill: a.cover.fill });
+        pushHistory(ed.snap);
+      } else {
+        p.annots.splice(i, 1);
+        if (!ed.isNew) pushHistory(ed.snap);
+      }
     } else {
-      if (ed.isNew || ed.styleChanged || a.text !== ed.original) pushHistory(ed.snap);
+      if (ed.isNew || !unchanged) pushHistory(ed.snap);
       // Keep the text selected so font, color and size changes apply to it.
       state.selected = { pageId: p.id, annotId: a.id };
     }
+  }
+  renderOverlay(p);
+  updateUI();
+}
+
+/* ---------------- comments (sticky notes) ---------------- */
+
+function startNoteEdit(p, a, isNew, snap) {
+  finishEdit();
+  setSelected({ pageId: p.id, annotId: a.id });
+  const el = pageElOf(p.id);
+  const at = pagePoint(el, a.x + NOTE_SIZE, a.y);
+  const box = document.createElement('div');
+  box.className = 'note-editor';
+  box.innerHTML = `
+    <textarea rows="4" placeholder="Write a comment…" aria-label="Comment"></textarea>
+    <div class="note-actions">
+      <button type="button" class="link-btn danger" data-act="delete">Delete</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn sm primary" data-act="done">Done</button>
+    </div>`;
+  box.style.left = `${clamp(at.x + 6, 4, Math.max(4, el.clientWidth - 244))}px`;
+  box.style.top = `${Math.max(4, at.y)}px`;
+  const ta = box.querySelector('textarea');
+  ta.value = a.text;
+  noteEditing = { pageId: p.id, a, isNew, snap, original: a.text, box };
+  ta.addEventListener('input', () => { a.text = ta.value; });
+  ta.addEventListener('keydown', (ev) => {
+    ev.stopPropagation();
+    if (ev.key === 'Escape' || (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey))) {
+      ev.preventDefault();
+      closeNoteEditor();
+    }
+  });
+  box.addEventListener('click', (ev) => {
+    const act = ev.target.closest('[data-act]')?.dataset.act;
+    if (act === 'done') closeNoteEditor();
+    if (act === 'delete') closeNoteEditor({ remove: true });
+  });
+  el.appendChild(box);
+  setTimeout(() => ta.focus());
+}
+
+function closeNoteEditor({ remove = false } = {}) {
+  if (!noteEditing) return;
+  const ne = noteEditing;
+  noteEditing = null;
+  ne.box.remove();
+  const p = findPage(ne.pageId);
+  if (!p || !p.annots.includes(ne.a)) return;
+  if (remove || !ne.a.text.trim()) {
+    p.annots = p.annots.filter((x) => x !== ne.a);
+    if (!ne.isNew) pushHistory(ne.snap);
+    if (state.selected && state.selected.annotId === ne.a.id) state.selected = null;
+  } else if (ne.isNew || ne.a.text !== ne.original) {
+    pushHistory(ne.snap);
   }
   renderOverlay(p);
   updateUI();
@@ -1094,6 +1462,7 @@ function addAnnotCopy(source, pageId, offset) {
   if (!p) return;
   const a = structuredClone(source);
   a.id = uid();
+  delete a.cover; // a copied text edit is just text
   const b = annotBounds(a);
   const dx = clamp(offset, -b.x, Math.max(-b.x, p.baseW - b.x - b.w));
   const dy = clamp(offset, -b.y, Math.max(-b.y, p.baseH - b.y - b.h));
@@ -1120,24 +1489,23 @@ function nudge(dx, dy) {
   renderOverlay(findPage(state.selected.pageId));
 }
 
-document.addEventListener('copy', (e) => {
-  if (isTyping(e.target) || openModalId()) return;
+function copySelectionTo(clipboardData) {
   const a = selectedAnnot();
-  if (!a) return;
+  clip = { annot: structuredClone(a), pageId: state.selected.pageId, pastes: 0, marker: a.type === 'text' || a.type === 'note' ? a.text : CLIP_MARKER };
+  clipboardData.setData('text/plain', clip.marker);
+  clipboardData.setData(CLIP_MIME, a.id);
+}
+
+document.addEventListener('copy', (e) => {
+  if (isTyping(e.target) || openModalId() || !selectedAnnot()) return;
   e.preventDefault();
-  clip = { annot: structuredClone(a), pageId: state.selected.pageId, pastes: 0 };
-  clip.marker = a.type === 'text' ? a.text : CLIP_MARKER;
-  e.clipboardData.setData('text/plain', clip.marker);
-  e.clipboardData.setData(CLIP_MIME, a.id);
+  copySelectionTo(e.clipboardData);
 });
 
 document.addEventListener('cut', (e) => {
   if (isTyping(e.target) || openModalId() || !selectedAnnot()) return;
   e.preventDefault();
-  const a = selectedAnnot();
-  clip = { annot: structuredClone(a), pageId: state.selected.pageId, pastes: 0, marker: a.type === 'text' ? a.text : CLIP_MARKER };
-  e.clipboardData.setData('text/plain', clip.marker);
-  e.clipboardData.setData(CLIP_MIME, a.id);
+  copySelectionTo(e.clipboardData);
   deleteSelected();
 });
 
@@ -1239,14 +1607,44 @@ $('fileImage').addEventListener('change', async (e) => {
   }
 });
 
+/* ---------------- menu ---------------- */
+
+function toggleMenu(open) {
+  const menu = $('moreMenu');
+  const show = open ?? menu.hidden;
+  menu.hidden = !show;
+  $('btnMore').setAttribute('aria-expanded', String(show));
+}
+
+const MENU_ACTIONS = {
+  find: () => openSearch(),
+  decor: () => openDecorDialog(),
+  images: () => { $('fileImages').value = ''; $('fileImages').click(); },
+  'export-images': () => openImageExportDialog(),
+  split: () => openSplitDialog(),
+  shortcuts: () => openModal('keysModal'),
+};
+
+$('btnMore').addEventListener('click', () => toggleMenu());
+$('moreMenu').addEventListener('click', (e) => {
+  const item = e.target.closest('[data-menu]');
+  if (!item || item.disabled) return;
+  toggleMenu(false);
+  MENU_ACTIONS[item.dataset.menu]();
+});
+document.addEventListener('pointerdown', (e) => {
+  if (!$('moreMenu').hidden && !e.target.closest('.menu-wrap')) toggleMenu(false);
+});
+
 /* ---------------- wiring ---------------- */
 
 const openPicker = () => { $('filePdf').value = ''; $('filePdf').click(); };
 $('btnOpen').addEventListener('click', openPicker);
 $('btnOpen2').addEventListener('click', openPicker);
-$('filePdf').addEventListener('change', (e) => { if (e.target.files.length) loadPdfFiles([e.target.files[0]], true); });
+$('filePdf').addEventListener('change', (e) => { if (e.target.files.length) openFiles([...e.target.files], true); });
 $('btnMerge').addEventListener('click', () => { $('fileMerge').value = ''; $('fileMerge').click(); });
-$('fileMerge').addEventListener('change', (e) => { if (e.target.files.length) loadPdfFiles([...e.target.files], false); });
+$('fileMerge').addEventListener('change', (e) => { if (e.target.files.length) openFiles([...e.target.files], false); });
+$('fileImages').addEventListener('change', (e) => { if (e.target.files.length) openFiles([...e.target.files], !state.pages.length); });
 $('btnBlank').addEventListener('click', addBlankPage);
 $('btnBlank2').addEventListener('click', addBlankPage);
 $('btnUndo').addEventListener('click', undo);
@@ -1271,15 +1669,12 @@ $('pgDel').addEventListener('click', () => deletePages(targetPageIds()));
 $('pgExtract').addEventListener('click', () => extractPages(targetPageIds()));
 $('pgSplit').addEventListener('click', openSplitDialog);
 
-// Modals: Cancel buttons and backdrop clicks close them.
-document.querySelectorAll('.modal').forEach((modal) => {
-  modal.addEventListener('pointerdown', (e) => {
-    if (e.target !== modal) return;
-    if (modal.id === 'sigModal') closeSignature(); else closeModal(modal.id);
-  });
-  modal.querySelectorAll('[data-close]').forEach((b) => {
-    if (modal.id !== 'sigModal') b.addEventListener('click', () => closeModal(modal.id));
-  });
+// Modals: Cancel buttons and backdrop clicks dismiss them.
+MODALS.forEach((id) => {
+  const modal = $(id);
+  modal.addEventListener('pointerdown', (e) => { if (e.target === modal) dismissModal(id); });
+  if (id === 'sigModal') return; // signature.js wires its own Cancel
+  modal.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => dismissModal(id)));
 });
 
 // Clicking the gray area around the pages deselects. (Checking the target directly: a click
@@ -1288,17 +1683,19 @@ viewer.addEventListener('pointerdown', (e) => {
   if ((e.target === viewer || e.target === pagesEl) && state.selected) setSelected(null);
 });
 
-const TOOL_KEYS = { v: 'select', t: 'text', d: 'draw', h: 'highlight', r: 'rect', w: 'whiteout', i: 'image', s: 'sign' };
+const TOOL_KEYS = { v: 'select', e: 'edittext', t: 'text', d: 'draw', h: 'highlight', r: 'shape', w: 'whiteout', n: 'note', m: 'stamp', i: 'image', s: 'sign' };
 const NUDGE_KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 document.addEventListener('keydown', (e) => {
   const modal = openModalId();
   if (modal) {
-    if (e.key === 'Escape') { if (modal === 'sigModal') closeSignature(); else closeModal(modal); }
+    if (e.key === 'Escape') dismissModal(modal);
     return;
   }
   const mod = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
+  if (e.key === 'Escape' && !$('moreMenu').hidden) { toggleMenu(false); return; }
   if (mod && key === 's') { e.preventDefault(); openDownloadDialog(); return; }
+  if (mod && key === 'f') { e.preventDefault(); openSearch(); return; }
   if (isTyping(e.target)) return;
 
   if (mod && key === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
@@ -1316,7 +1713,12 @@ document.addEventListener('keydown', (e) => {
     nudge(NUDGE_KEYS[e.key][0] * step, NUDGE_KEYS[e.key][1] * step);
   }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected) { e.preventDefault(); deleteSelected(); }
-  else if (e.key === 'Escape') { setSelected(null); if (state.tool !== 'select') setTool('select'); }
+  else if (e.key === 'Escape') {
+    if (!$('searchbar').hidden) closeSearch();
+    setSelected(null);
+    if (state.tool !== 'select') setTool('select');
+  }
+  else if (e.key === '?') openModal('keysModal');
   else if (!mod && !e.altKey && state.pages.length) {
     if (TOOL_KEYS[key]) setTool(TOOL_KEYS[key]);
     else if (e.key === '+' || e.key === '=') setZoom(state.zoom * 1.2);
@@ -1324,14 +1726,14 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Drag & drop PDFs onto the window.
+// Drag & drop PDFs and images onto the window.
 let dropDepth = 0;
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 window.addEventListener('dragenter', (e) => {
   if (!hasFiles(e)) return;
   e.preventDefault();
   dropDepth++;
-  $('dropmask').firstElementChild.textContent = state.pages.length ? 'Drop PDFs to add their pages' : 'Drop PDF to open';
+  $('dropmask').firstElementChild.textContent = state.pages.length ? 'Drop PDFs or images to add pages' : 'Drop files to open';
   $('dropmask').hidden = false;
 });
 window.addEventListener('dragleave', (e) => {
@@ -1344,10 +1746,7 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   dropDepth = 0;
   $('dropmask').hidden = true;
-  const pdfs = [...e.dataTransfer.files].filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
-  if (!pdfs.length) { toast('Only PDF files can be dropped here.'); return; }
-  if (state.pages.length) loadPdfFiles(pdfs, false);
-  else loadPdfFiles(pdfs.slice(0, 1), true).then(() => { if (pdfs.length > 1) loadPdfFiles(pdfs.slice(1), false); });
+  openFiles([...e.dataTransfer.files], !state.pages.length);
 });
 
 window.addEventListener('beforeunload', (e) => {
@@ -1371,4 +1770,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 installFontFaces();
 initSignature();
 initExportDialogs();
+initTextLayer();
+initSearch();
+initDecor();
 updateUI();

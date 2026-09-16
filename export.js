@@ -55,10 +55,15 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
   }
 
   const added = [];
+  const total = state.pages.length;
   for (const p of pages) {
     const page = p.src === null ? out.addPage([p.baseW, p.baseH]) : out.addPage(copiedFor.get(p));
     page.setRotation(degrees((p.rot0 + p.rot) % 360));
+    const index = state.pages.indexOf(p);
+    const decor = decorItems(p, index, total);
+    if (p.annots.length || decor.length) isolatePageContent(out, page);
     if (p.annots.length) await drawAnnotations(out, page, p, fonts, images);
+    if (decor.length) await drawDecor(out, page, p, decor, fonts);
     added.push(page);
   }
 
@@ -143,6 +148,7 @@ function registerFormFields(out, pages, srcDoc) {
     prune(out.context.lookup(ref));
     acro.addField(ref);
   }
+
   // Default appearance and resources, needed by viewers to draw edited values.
   const srcAcro = srcDoc.catalog.getAcroForm();
   if (srcAcro) {
@@ -154,12 +160,80 @@ function registerFormFields(out, pages, srcDoc) {
   }
 }
 
+/* ---------------- drawing helpers ---------------- */
+
+// Wrap the original page content in q/Q so any graphics state it leaves behind can't skew our drawing.
+function isolatePageContent(out, page) {
+  try {
+    const c = out.context;
+    page.node.wrapContentStreams(
+      c.register(c.contentStream([pushGraphicsState()])),
+      c.register(c.contentStream([popGraphicsState()])),
+    );
+  } catch { /* draw without wrapping */ }
+}
+
+// Transform from a y-up frame of the page as displayed with `rotation` applied
+// (origin bottom-left) to PDF user space. W/H: unrotated crop box size, x0/y0: its origin.
+function frameMatrix(rotation, W, H, x0, y0) {
+  return {
+    0: [1, 0, 0, 1, x0, y0],
+    90: [0, 1, -1, 0, W + x0, y0],
+    180: [-1, 0, 0, -1, W + x0, H + y0],
+    270: [0, -1, 1, 0, x0, H + y0],
+  }[rotation];
+}
+
+function pageFrame(page, p, rotation) {
+  const odd = p.rot0 % 180 !== 0;
+  const W = odd ? p.baseH : p.baseW;
+  const H = odd ? p.baseW : p.baseH;
+  let x0 = 0;
+  let y0 = 0;
+  if (p.src !== null) {
+    const box = page.getCropBox();
+    x0 = box.x;
+    y0 = box.y;
+  }
+  return frameMatrix(rotation, W, H, x0, y0);
+}
+
 function pdfFont(out, file, fonts) {
   if (!fonts.has(file)) {
     // fontkitFor() also applies the subsetting fix in fonts.js before pdf-lib subsets anything.
     fonts.set(file, fontkitFor(file).then(() => fetchFontBytes(file)).then((bytes) => out.embedFont(bytes, { subset: true })));
   }
   return fonts.get(file);
+}
+
+// Draws one line of text in any script, switching fonts per character run.
+// x/y: baseline anchor (y up). align: left | center | right, measured along the text direction.
+async function drawTextLine(out, page, fonts, text, o) {
+  const runs = await splitRuns(text, o.file);
+  const measured = [];
+  let total = 0;
+  for (const run of runs) {
+    const font = await pdfFont(out, run.file, fonts);
+    const width = font.widthOfTextAtSize(run.text, o.size);
+    measured.push({ run, font, width });
+    total += width;
+  }
+  const angle = ((o.angle || 0) * Math.PI) / 180;
+  const ux = Math.cos(angle);
+  const uy = Math.sin(angle);
+  const shift = o.align === 'center' ? total / 2 : o.align === 'right' ? total : 0;
+  let x = o.x - ux * shift;
+  let y = o.y - uy * shift;
+  for (const { run, font, width } of measured) {
+    const opts = { x, y, size: o.size, font, color: o.color };
+    if (o.angle) opts.rotate = degrees(o.angle);
+    if (o.opacity != null) opts.opacity = o.opacity;
+    // Fallback script fonts have no italic face, so skew them like the browser does.
+    if (o.italic && (o.synthItalic || run.file !== o.file)) opts.ySkew = degrees(12);
+    page.drawText(run.text, opts);
+    x += ux * width;
+    y += uy * width;
+  }
 }
 
 function dataUrlBytes(dataUrl) {
@@ -169,51 +243,33 @@ function dataUrlBytes(dataUrl) {
   return bytes;
 }
 
-async function drawAnnotations(out, page, p, fonts, images) {
-  // Isolate the original content so any graphics state it leaves behind can't skew our drawing.
-  try {
-    const c = out.context;
-    page.node.wrapContentStreams(
-      c.register(c.contentStream([pushGraphicsState()])),
-      c.register(c.contentStream([popGraphicsState()])),
-    );
-  } catch { /* draw without wrapping */ }
+function roundedRectPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  return `M${x + r} ${y} H${x + w - r} Q${x + w} ${y} ${x + w} ${y + r} V${y + h - r} Q${x + w} ${y + h} ${x + w - r} ${y + h} `
+    + `H${x + r} Q${x} ${y + h} ${x} ${y + h - r} V${y + r} Q${x} ${y} ${x + r} ${y} Z`;
+}
 
-  // Transform so annotations can be drawn in the base frame with y up (baseW x baseH).
-  const r0 = p.rot0 % 360;
-  const W = r0 % 180 ? p.baseH : p.baseW; // unrotated page size
-  const H = r0 % 180 ? p.baseW : p.baseH;
-  let x0 = 0;
-  let y0 = 0;
-  if (p.src !== null) {
-    const box = page.getCropBox();
-    x0 = box.x;
-    y0 = box.y;
-  }
-  const m = {
-    0: [1, 0, 0, 1, x0, y0],
-    90: [0, 1, -1, 0, W + x0, y0],
-    180: [-1, 0, 0, -1, W + x0, H + y0],
-    270: [0, -1, 1, 0, x0, H + y0],
-  }[r0];
+/* ---------------- annotations ---------------- */
+
+async function drawAnnotations(out, page, p, fonts, images) {
+  const m = pageFrame(page, p, p.rot0 % 360); // base frame: page with its own rotation
   const Bh = p.baseH;
+  const notes = [];
   page.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m));
 
   for (const a of p.annots) {
     if (a.type === 'text') {
+      if (a.cover) {
+        const c = a.cover;
+        page.drawRectangle({ x: c.x, y: Bh - c.y - c.h, width: c.w, height: c.h, color: hexToRgb(c.fill) });
+      }
       const { file, synthItalic } = faceFile(a.font, a.bold, a.italic);
       const lines = a.text.replace(/\r/g, '').replace(/\t/g, '    ').split('\n');
       for (let i = 0; i < lines.length; i++) {
-        let x = a.x;
-        const y = Bh - (a.y + a.size * (0.8 + 1.2 * i));
-        for (const run of await splitRuns(lines[i], file)) {
-          const font = await pdfFont(out, run.file, fonts);
-          const opts = { x, y, size: a.size, font, color: hexToRgb(a.color) };
-          // Fallback script fonts have no italic face, so skew them like the browser does.
-          if (synthItalic || (a.italic && run.file !== file)) opts.ySkew = degrees(12);
-          page.drawText(run.text, opts);
-          x += font.widthOfTextAtSize(run.text, a.size);
-        }
+        await drawTextLine(out, page, fonts, lines[i], {
+          x: a.x, y: Bh - (a.y + a.size * (0.8 + 1.2 * i)), size: a.size, color: hexToRgb(a.color),
+          file, italic: a.italic, synthItalic,
+        });
       }
     } else if (a.type === 'ink') {
       page.drawSvgPath(inkPath(a.points), {
@@ -225,9 +281,34 @@ async function drawAnnotations(out, page, p, fonts, images) {
       if (a.kind === 'highlight') {
         page.drawRectangle({ ...box, color: hexToRgb(a.color), opacity: 0.4, blendMode: BlendMode ? BlendMode.Multiply : undefined });
       } else if (a.kind === 'whiteout') {
-        page.drawRectangle({ ...box, color: rgb(1, 1, 1) });
+        page.drawRectangle({ ...box, color: hexToRgb(a.fill || '#ffffff') });
+      } else if (a.kind === 'ellipse') {
+        page.drawEllipse({ x: a.x + a.w / 2, y: Bh - a.y - a.h / 2, xScale: a.w / 2, yScale: a.h / 2, borderColor: hexToRgb(a.color), borderWidth: a.width });
       } else {
         page.drawRectangle({ ...box, borderColor: hexToRgb(a.color), borderWidth: a.width });
+      }
+    } else if (a.type === 'line') {
+      const geo = lineGeometry(a);
+      page.drawLine({
+        start: { x: a.x1, y: Bh - a.y1 }, end: { x: geo.end[0], y: Bh - geo.end[1] },
+        thickness: a.width, color: hexToRgb(a.color), lineCap: LineCapStyle ? LineCapStyle.Round : undefined,
+      });
+      if (geo.head) {
+        const [t, l, r] = geo.head;
+        page.drawSvgPath(`M${t[0]} ${t[1]} L${l[0]} ${l[1]} L${r[0]} ${r[1]} Z`, { x: 0, y: Bh, color: hexToRgb(a.color) });
+      }
+    } else if (a.type === 'stamp') {
+      const s = stampLayout(a);
+      const color = hexToRgb(a.color);
+      page.drawSvgPath(roundedRectPath(a.x + s.border / 2, a.y + s.border / 2, a.w - s.border, a.h - s.border, a.h * 0.14), {
+        x: 0, y: Bh, borderColor: color, borderWidth: s.border, borderOpacity: 0.9,
+      });
+      const cx = a.x + a.w / 2;
+      if (s.main) {
+        await drawTextLine(out, page, fonts, s.main, { x: cx, y: Bh - s.mainBaseline, size: s.size, color, file: FONT_FAMILIES.sans.files.b, align: 'center', opacity: 0.9 });
+      }
+      if (s.two) {
+        await drawTextLine(out, page, fonts, a.sub, { x: cx, y: Bh - s.subBaseline, size: s.subSize, color, file: FONT_FAMILIES.sans.files.r, align: 'center', opacity: 0.9 });
       }
     } else if (a.type === 'image') {
       let img = images.get(a.imageId);
@@ -238,7 +319,69 @@ async function drawAnnotations(out, page, p, fonts, images) {
         images.set(a.imageId, img);
       }
       page.drawImage(img, { x: a.x, y: Bh - a.y - a.h, width: a.w, height: a.h });
+    } else if (a.type === 'note') {
+      notes.push(a);
     }
+  }
+  page.pushOperators(popGraphicsState());
+  for (const a of notes) addCommentAnnotation(out, page, a, m, Bh);
+}
+
+// Comments become real PDF "sticky note" annotations that other viewers show as pop-ups.
+function addCommentAnnotation(out, page, a, m, Bh) {
+  const { PDFHexString, PDFString, rectangle, fillAndStroke, setFillingRgbColor, setStrokingRgbColor, setLineWidth, moveTo, lineTo, stroke } = PDFLib;
+  const toPdf = (x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+  const corners = [toPdf(a.x, Bh - a.y), toPdf(a.x + NOTE_SIZE, Bh - a.y - NOTE_SIZE)];
+  const rect = [
+    Math.min(corners[0][0], corners[1][0]), Math.min(corners[0][1], corners[1][1]),
+    Math.max(corners[0][0], corners[1][0]), Math.max(corners[0][1], corners[1][1]),
+  ];
+  const n = parseInt(a.color.slice(1), 16);
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => v / 255);
+  const s = NOTE_SIZE;
+  const appearance = out.context.formXObject([
+    setFillingRgbColor(r, g, b), setStrokingRgbColor(0.35, 0.35, 0.35), setLineWidth(1),
+    rectangle(0.5, 0.5, s - 1, s - 1), fillAndStroke(),
+    setStrokingRgbColor(0.3, 0.3, 0.3),
+    moveTo(s * 0.22, s * 0.68), lineTo(s * 0.78, s * 0.68),
+    moveTo(s * 0.22, s * 0.5), lineTo(s * 0.78, s * 0.5),
+    moveTo(s * 0.22, s * 0.32), lineTo(s * 0.6, s * 0.32), stroke(),
+  ], { BBox: [0, 0, s, s] });
+  const dict = out.context.obj({
+    Type: 'Annot',
+    Subtype: 'Text',
+    Rect: rect,
+    Contents: PDFHexString.fromText(a.text),
+    T: PDFHexString.fromText('PDF Editor'),
+    M: PDFString.fromDate(new Date()),
+    Name: 'Comment',
+    C: [r, g, b],
+    F: 4 | 8 | 16, // print, no zoom, no rotate
+    Open: false,
+    AP: { N: out.context.register(appearance) },
+  });
+  page.node.addAnnot(out.context.register(dict));
+}
+
+/* ---------------- page numbers, headers, watermark ---------------- */
+
+async function drawDecor(out, page, p, items, fonts) {
+  const m = pageFrame(page, p, (p.rot0 + p.rot) % 360); // displayed frame
+  const Dh = pageDims(p).h;
+  page.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m));
+  for (const it of items) {
+    const angle = ((it.angle || 0) * Math.PI) / 180;
+    let x = it.x;
+    let y = Dh - it.y;
+    if (it.middle) {
+      // Vertically center the text on its anchor, measured along the text's up direction.
+      x += Math.sin(angle) * it.size * 0.35;
+      y -= Math.cos(angle) * it.size * 0.35;
+    }
+    await drawTextLine(out, page, fonts, it.text, {
+      x, y, size: it.size, color: hexToRgb(it.color), align: it.align, angle: it.angle, opacity: it.opacity,
+      file: it.bold ? FONT_FAMILIES.sans.files.b : FONT_FAMILIES.sans.files.r,
+    });
   }
   page.pushOperators(popGraphicsState());
 }
@@ -430,6 +573,65 @@ async function runSplit(parts) {
   }
 }
 
+/* ---------------- pages as images ---------------- */
+
+function openImageExportDialog() {
+  if (!state.pages.length) return;
+  finishEdit();
+  const picked = state.pageSel.size;
+  $('imgCurrentLabel').textContent = `Current page (${state.current + 1})`;
+  $('imgSelectedLabel').textContent = picked ? `Selected pages (${picked})` : 'Selected pages (none selected)';
+  $('imgSelectedRadio').disabled = !picked;
+  $('imgAllLabel').textContent = `All pages (${state.pages.length})`;
+  if (picked) $('imgSelectedRadio').checked = true;
+  else if ($('imgSelectedRadio').checked) document.querySelector('input[name=imgPages][value=current]').checked = true;
+  openModal('imgModal');
+}
+
+async function runImageExport(pages, format, dpi) {
+  if (!pages.length || document.body.classList.contains('busy')) return;
+  finishEdit();
+  busy(true, 'Rendering images…');
+  let doc = null;
+  try {
+    // Render the finished PDF so the images include every edit, form answer and page number.
+    const bytes = await buildPdf(pages, { flatten: true });
+    doc = await pdfjsLib.getDocument({ data: bytes, cMapUrl: `${PDFJS_CDN}cmaps/`, cMapPacked: true, standardFontDataUrl: `${PDFJS_CDN}standard_fonts/` }).promise;
+    const ext = format === 'jpeg' ? 'jpg' : 'png';
+    const digits = String(state.pages.length).length;
+    const files = [];
+    for (let i = 0; i < pages.length; i++) {
+      $('hint').textContent = `Rendering page ${i + 1} of ${pages.length}…`;
+      const page = await doc.getPage(i + 1);
+      const vp = page.getViewport({ scale: dpi / 72 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(vp.width);
+      canvas.height = Math.round(vp.height);
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, `image/${format}`, 0.92));
+      const n = String(state.pages.indexOf(pages[i]) + 1).padStart(digits, '0');
+      files.push({ name: `${state.fileName}-page-${n}.${ext}`, blob });
+      canvas.width = canvas.height = 0;
+    }
+    if (files.length === 1) {
+      saveBlob(files[0].blob, files[0].name);
+      toast(`Downloaded ${files[0].name}`);
+    } else {
+      const zip = new JSZip();
+      files.forEach((f) => zip.file(f.name, f.blob));
+      const name = `${state.fileName}-images.zip`;
+      saveBlob(await zip.generateAsync({ type: 'blob' }), name);
+      toast(`Downloaded ${files.length} images as ${name}`);
+    }
+  } catch (err) {
+    console.error(err);
+    toast(`Couldn't create the images: ${err.message}`);
+  } finally {
+    if (doc) doc.destroy();
+    busy(false);
+  }
+}
+
 function initExportDialogs() {
   $('dlForm').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -452,5 +654,15 @@ function initExportDialogs() {
     try { parts = splitParts(); } catch { updateSplitPreview(); return; }
     closeModal('splitModal');
     runSplit(parts);
+  });
+
+  $('imgForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const which = document.querySelector('input[name=imgPages]:checked').value;
+    const pages = which === 'all' ? state.pages
+      : which === 'selected' ? state.pages.filter((p) => state.pageSel.has(p.id))
+        : [state.pages[state.current]].filter(Boolean);
+    closeModal('imgModal');
+    runImageExport(pages, document.querySelector('input[name=imgFormat]:checked').value, Number(document.querySelector('input[name=imgDpi]:checked').value));
   });
 }

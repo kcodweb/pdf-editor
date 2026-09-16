@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PDF Editor</title>
-<meta name="description" content="Edit PDFs in your browser: fill forms, add text, drawings, highlights, images and signatures, reorder, split and merge pages. Files never leave your device.">
+<meta name="description" content="Edit PDFs in your browser: change existing text, fill forms, add text, shapes, stamps, comments, signatures and page numbers, split, merge and convert. Files never leave your device.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2h8l5 5v15H6z'/%3E%3Cpath d='M14 2v5h5M9 13h7M9 17h5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -16,18 +16,35 @@
   </div>
 
   <div class="group">
-    <button id="btnOpen" class="btn" title="Open a PDF (Ctrl+O)">Open</button>
-    <button id="btnMerge" class="btn" title="Append pages from other PDFs">Add PDF</button>
+    <button id="btnOpen" class="btn" title="Open a PDF or images (Ctrl+O)">Open</button>
+    <button id="btnMerge" class="btn" title="Append pages from other PDFs or images">Add files</button>
     <button id="btnBlank" class="btn" title="Insert a blank page after the current page">Blank page</button>
+    <div class="menu-wrap">
+      <button id="btnMore" class="btn" aria-haspopup="menu" aria-expanded="false">More
+        <svg viewBox="0 0 24 24" class="chev"><path d="M6 9l6 6 6-6"/></svg></button>
+      <div class="menu" id="moreMenu" role="menu" hidden>
+        <button role="menuitem" data-menu="find" data-needs-doc>Find text<kbd>Ctrl+F</kbd></button>
+        <button role="menuitem" data-menu="decor" data-needs-doc>Page numbers, headers &amp; watermark…</button>
+        <hr>
+        <button role="menuitem" data-menu="images">Images to PDF…</button>
+        <button role="menuitem" data-menu="export-images" data-needs-doc>Save pages as images…</button>
+        <button role="menuitem" data-menu="split" data-needs-doc>Split PDF…</button>
+        <hr>
+        <button role="menuitem" data-menu="shortcuts">Keyboard shortcuts<kbd>?</kbd></button>
+      </div>
+    </div>
   </div>
 
   <div class="group tools" id="tools">
     <button class="tool active" data-tool="select" title="Select &amp; move (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-3 6z"/></svg><span>Select</span></button>
-    <button class="tool" data-tool="text" title="Text (T)"><svg viewBox="0 0 24 24"><path d="M5 7V4h14v3M12 4v16M9 20h6"/></svg><span>Text</span></button>
+    <button class="tool" data-tool="edittext" title="Edit existing text (E)"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/></svg><span>Edit text</span></button>
+    <button class="tool" data-tool="text" title="Add text (T)"><svg viewBox="0 0 24 24"><path d="M5 7V4h14v3M12 4v16M9 20h6"/></svg><span>Text</span></button>
     <button class="tool" data-tool="draw" title="Draw (D)"><svg viewBox="0 0 24 24"><path d="M3 17c3-4 5-9 8-9s1 8 4 8 4-4 6-6"/></svg><span>Draw</span></button>
     <button class="tool" data-tool="highlight" title="Highlight (H)"><svg viewBox="0 0 24 24"><path d="M9 11l-5 5v3h3l5-5M9 11l4-4 4 4-4 4zM14 20h7"/></svg><span>Highlight</span></button>
-    <button class="tool" data-tool="rect" title="Box (R)"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1"/></svg><span>Box</span></button>
+    <button class="tool" data-tool="shape" title="Shapes: box, circle, line, arrow (R)"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="10" height="10" rx="1"/><circle cx="16" cy="16" r="5"/></svg><span>Shapes</span></button>
     <button class="tool" data-tool="whiteout" title="White-out (W)"><svg viewBox="0 0 24 24"><path d="M7 20h13M4 15l9-9 6 6-7 7H8z"/></svg><span>White-out</span></button>
+    <button class="tool" data-tool="note" title="Comment (N)"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H10l-6 4z"/><path d="M8 8h8M8 12h5"/></svg><span>Comment</span></button>
+    <button class="tool" data-tool="stamp" title="Stamp (M)"><svg viewBox="0 0 24 24"><path d="M9.5 3h5l-1 7h-3z"/><path d="M4 13h16v4H4zM6 21h12"/></svg><span>Stamp</span></button>
     <button class="tool" data-tool="image" title="Image (I)"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 16l-5-5-8 8"/></svg><span>Image</span></button>
     <button class="tool" data-tool="sign" title="Signature (S)"><svg viewBox="0 0 24 24"><path d="M3 16c2 0 3-6 5-6s1 5 3 5 2-3 4-3 2 2 6 2M3 21h18"/></svg><span>Sign</span></button>
   </div>
@@ -40,6 +57,27 @@
     </select>
     <button id="btnBold" class="icon-btn toggle" title="Bold (Ctrl+B)" aria-pressed="false"><b>B</b></button>
     <button id="btnItalic" class="icon-btn toggle" title="Italic (Ctrl+I)" aria-pressed="false"><i>I</i></button>
+  </div>
+
+  <div class="group" id="shapeKinds" hidden>
+    <button class="icon-btn toggle" data-shape="rect" title="Box" aria-pressed="true"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1"/></svg></button>
+    <button class="icon-btn toggle" data-shape="ellipse" title="Circle / ellipse" aria-pressed="false"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="8.5" ry="6.5"/></svg></button>
+    <button class="icon-btn toggle" data-shape="line" title="Line" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M5 19L19 5"/></svg></button>
+    <button class="icon-btn toggle" data-shape="arrow" title="Arrow" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg></button>
+  </div>
+
+  <div class="group" id="stampOptions" hidden>
+    <select id="stampKind" title="Stamp">
+      <option value="approved">Approved</option>
+      <option value="draft">Draft</option>
+      <option value="confidential">Confidential</option>
+      <option value="rejected">Rejected</option>
+      <option value="paid">Paid</option>
+      <option value="received">Received + date</option>
+      <option value="date">Today's date</option>
+      <option value="custom">Custom text…</option>
+    </select>
+    <input id="stampText" class="stamp-text" placeholder="Stamp text" maxlength="40" hidden>
   </div>
 
   <div class="group style">
@@ -55,6 +93,7 @@
   </div>
 
   <div class="group zoom">
+    <button id="btnFind" class="icon-btn" title="Find text (Ctrl+F)"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></button>
     <button id="btnZoomOut" class="icon-btn" title="Zoom out (-)">&minus;</button>
     <button id="btnFit" class="zoom-label" title="Fit width"><span id="zoomLabel">125%</span></button>
     <button id="btnZoomIn" class="icon-btn" title="Zoom in (+)">+</button>
@@ -89,20 +128,31 @@
     <div class="empty" id="empty">
       <div class="dropcard">
         <h1>Edit a PDF in your browser</h1>
-        <p>Fill forms, add text, drawings, highlights, images and signatures. Reorder, rotate, split and merge pages. Files never leave your device.</p>
-        <button class="btn primary big" id="btnOpen2">Choose a PDF</button>
+        <p>Change existing text, fill forms, add comments, stamps, signatures and page numbers. Split, merge and convert. Files never leave your device.</p>
+        <button class="btn primary big" id="btnOpen2">Choose a PDF or images</button>
         <button class="btn link" id="btnBlank2">or start with a blank page</button>
-        <p class="muted">You can also drop a PDF anywhere on this page.</p>
+        <p class="muted">You can also drop files anywhere on this page.</p>
       </div>
     </div>
     <div class="pages" id="pages"></div>
   </section>
+
+  <div class="searchbar" id="searchbar" role="search" hidden>
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>
+    <input id="searchInput" placeholder="Find in document" spellcheck="false" aria-label="Find in document">
+    <span id="searchCount" class="search-count"></span>
+    <button class="icon-btn sm" id="searchPrev" title="Previous (Shift+Enter)"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+    <button class="icon-btn sm" id="searchNext" title="Next (Enter)"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+    <button class="btn sm" id="searchHighlight" title="Add a highlight to every match">Highlight all</button>
+    <button class="icon-btn sm" id="searchClose" title="Close (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
 </div>
 
 <footer class="statusbar"><span id="hint"></span><span id="pageInfo"></span></footer>
 
-<input type="file" id="filePdf" accept="application/pdf,.pdf" hidden>
-<input type="file" id="fileMerge" accept="application/pdf,.pdf" multiple hidden>
+<input type="file" id="filePdf" accept="application/pdf,.pdf,image/*" multiple hidden>
+<input type="file" id="fileMerge" accept="application/pdf,.pdf,image/*" multiple hidden>
+<input type="file" id="fileImages" accept="image/*" multiple hidden>
 <input type="file" id="fileImage" accept="image/*" hidden>
 
 <!-- Signature -->
@@ -179,7 +229,132 @@
   </form>
 </div>
 
-<div class="dropmask" id="dropmask" hidden><div>Drop PDF to open</div></div>
+<!-- Page numbers, headers & watermark (previews live, so it sits beside the pages) -->
+<div class="modal side" id="decorModal" hidden>
+  <form class="modal-card narrow" id="decorForm" role="dialog" aria-labelledby="decorTitle">
+    <h2 id="decorTitle">Page numbers, headers &amp; watermark</h2>
+    <p class="muted">Added to every page and kept up to date when pages move. In text you can use <code>{page}</code> <code>{total}</code> <code>{date}</code> <code>{file}</code>.</p>
+
+    <section class="decor-section">
+      <label class="check strong"><input type="checkbox" id="dNumbers"> Page numbers</label>
+      <div class="decor-row">
+        <select id="dNumPos" title="Position">
+          <option value="bottom-center">Bottom center</option>
+          <option value="bottom-right">Bottom right</option>
+          <option value="bottom-left">Bottom left</option>
+          <option value="top-center">Top center</option>
+          <option value="top-right">Top right</option>
+          <option value="top-left">Top left</option>
+        </select>
+        <select id="dNumFormat" title="Format">
+          <option value="{page}">1</option>
+          <option value="Page {page}">Page 1</option>
+          <option value="Page {page} of {total}">Page 1 of 9</option>
+          <option value="{page} / {total}">1 / 9</option>
+          <option value="– {page} –">– 1 –</option>
+        </select>
+        <label class="mini">Start at <input type="number" id="dStart" class="inline-num" min="0" value="1"></label>
+      </div>
+    </section>
+
+    <section class="decor-section">
+      <label class="check strong"><input type="checkbox" id="dHeader"> Header</label>
+      <div class="decor-row">
+        <input id="dHeaderText" class="text-input" placeholder="e.g. {file}">
+        <select id="dHeaderAlign" title="Alignment"><option value="left">Left</option><option value="center" selected>Center</option><option value="right">Right</option></select>
+      </div>
+    </section>
+
+    <section class="decor-section">
+      <label class="check strong"><input type="checkbox" id="dFooter"> Footer</label>
+      <div class="decor-row">
+        <input id="dFooterText" class="text-input" placeholder="e.g. Confidential · {date}">
+        <select id="dFooterAlign" title="Alignment"><option value="left" selected>Left</option><option value="center">Center</option><option value="right">Right</option></select>
+      </div>
+    </section>
+
+    <div class="decor-row">
+      <label class="mini">Text size <input type="number" id="dSize" class="inline-num" min="6" max="48" value="10"></label>
+      <label class="mini">Margin <input type="number" id="dMargin" class="inline-num" min="6" max="144" value="30"></label>
+      <label class="mini">Color <input type="color" id="dColor" value="#475569"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="dSkipFirst"> Skip the first page (cover)</label>
+
+    <section class="decor-section">
+      <label class="check strong"><input type="checkbox" id="dWatermark"> Watermark</label>
+      <div class="decor-row">
+        <input id="dWmText" class="text-input" placeholder="CONFIDENTIAL">
+        <label class="mini">Size <input type="number" id="dWmSize" class="inline-num" min="12" max="300" value="72"></label>
+      </div>
+      <div class="decor-row">
+        <label class="mini">Opacity <input type="range" id="dWmOpacity" min="5" max="60" value="15"></label>
+        <label class="mini">Color <input type="color" id="dWmColor" value="#dc2626"></label>
+        <label class="check"><input type="checkbox" id="dWmDiagonal" checked> Diagonal</label>
+      </div>
+    </section>
+
+    <div class="modal-actions">
+      <button type="button" class="btn link" id="decorRemove">Remove all</button>
+      <div class="spacer"></div>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Apply</button>
+    </div>
+  </form>
+</div>
+
+<!-- Save pages as images -->
+<div class="modal" id="imgModal" hidden>
+  <form class="modal-card narrow" id="imgForm" role="dialog" aria-labelledby="imgTitle">
+    <h2 id="imgTitle">Save pages as images</h2>
+    <fieldset>
+      <legend>Pages</legend>
+      <label class="radio"><input type="radio" name="imgPages" value="current" checked><span id="imgCurrentLabel">Current page</span></label>
+      <label class="radio"><input type="radio" name="imgPages" value="selected" id="imgSelectedRadio"><span id="imgSelectedLabel">Selected pages</span></label>
+      <label class="radio"><input type="radio" name="imgPages" value="all"><span id="imgAllLabel">All pages</span></label>
+    </fieldset>
+    <fieldset>
+      <legend>Format</legend>
+      <label class="radio"><input type="radio" name="imgFormat" value="png" checked><span><b>PNG</b> — sharpest, larger files</span></label>
+      <label class="radio"><input type="radio" name="imgFormat" value="jpeg"><span><b>JPG</b> — smaller files, good for photos</span></label>
+    </fieldset>
+    <fieldset>
+      <legend>Resolution</legend>
+      <label class="radio"><input type="radio" name="imgDpi" value="72"><span><b>Screen</b> (72 DPI)</span></label>
+      <label class="radio"><input type="radio" name="imgDpi" value="150" checked><span><b>Standard</b> (150 DPI)</span></label>
+      <label class="radio"><input type="radio" name="imgDpi" value="300"><span><b>Print</b> (300 DPI)</span></label>
+    </fieldset>
+    <p class="muted">Several pages download together as a ZIP file.</p>
+    <div class="modal-actions">
+      <div class="spacer"></div>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save images</button>
+    </div>
+  </form>
+</div>
+
+<!-- Keyboard shortcuts -->
+<div class="modal" id="keysModal" hidden>
+  <div class="modal-card narrow" role="dialog" aria-labelledby="keysTitle">
+    <h2 id="keysTitle">Keyboard shortcuts</h2>
+    <dl class="keys">
+      <dt><kbd>V</kbd> <kbd>E</kbd> <kbd>T</kbd> <kbd>D</kbd> <kbd>H</kbd></dt><dd>Select, edit text, add text, draw, highlight</dd>
+      <dt><kbd>R</kbd> <kbd>W</kbd> <kbd>N</kbd> <kbd>M</kbd> <kbd>I</kbd> <kbd>S</kbd></dt><dd>Shapes, white-out, comment, stamp, image, sign</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>F</kbd></dt><dd>Find text</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Undo / redo</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>X</kbd> <kbd>V</kbd></dt><dd>Copy, cut, paste items (also paste images and text)</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>D</kbd></dt><dd>Duplicate selected item</dd>
+      <dt><kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd></dt><dd>Nudge selected item (hold <kbd>Shift</kbd> for 10×)</dd>
+      <dt><kbd>Delete</kbd></dt><dd>Delete selected item</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>Ctrl</kbd>+<kbd>I</kbd></dt><dd>Bold / italic text</dd>
+      <dt><kbd>Shift</kbd> while dragging</dt><dd>Straight 45° lines, free image resizing</dd>
+      <dt><kbd>+</kbd> <kbd>−</kbd> / <kbd>Ctrl</kbd>+scroll</dt><dd>Zoom</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>S</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd></dt><dd>Download / open</dd>
+    </dl>
+    <div class="modal-actions"><div class="spacer"></div><button class="btn primary" data-close>Close</button></div>
+  </div>
+</div>
+
+<div class="dropmask" id="dropmask" hidden><div>Drop files to open</div></div>
 <div class="toast" id="toast" hidden></div>
 
 <script src="vendor/pdf.min.js"></script>
@@ -188,6 +363,8 @@
 <script src="vendor/jszip.min.js"></script>
 <script src="fonts.js"></script>
 <script src="forms.js"></script>
+<script src="textlayer.js"></script>
+<script src="decor.js"></script>
 <script src="export.js"></script>
 <script src="signature.js"></script>
 <script src="app.js"></script>
