@@ -9,7 +9,12 @@ const nativeFiles = new Map(); // file name -> saved file URI, for sharing after
 
 if (NATIVE_APP) {
   document.documentElement.classList.add('native-app');
-  const { Filesystem, Share, App } = window.Capacitor.Plugins;
+  // Without a bundler, plugins are reached through the bridge; registerPlugin creates the proxy if needed.
+  const cap = window.Capacitor;
+  const plugin = (name) => (cap.Plugins && cap.Plugins[name]) || cap.registerPlugin(name);
+  const Filesystem = plugin('Filesystem');
+  const Share = plugin('Share');
+  const App = plugin('App');
 
   const blobToBase64 = (blob) => new Promise((resolve, reject) => {
     const reader = new FileReader();
