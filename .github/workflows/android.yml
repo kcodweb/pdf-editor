@@ -1,0 +1,82 @@
+name: Android app
+
+# Builds a signed APK of PDF Worker on every push to main (and on demand),
+# and publishes it as a GitHub release. The site links to releases/latest/download/PDF-Worker.apk.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Capacitor
+        run: npm ci
+
+      - name: Copy the web app into the Android project
+        run: |
+          npm run build:web
+          npx cap sync android
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+
+      - name: Build signed APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon \
+            -PappVersionCode=${{ github.run_number }} \
+            -PappVersionName=1.0.${{ github.run_number }}
+          cp app/build/outputs/apk/release/app-release.apk ../PDF-Worker.apk
+          rm -f app/release.keystore
+
+      - name: Check the signature
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs PDF-Worker.apk | head -3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDF-Worker-apk
+          path: PDF-Worker.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-v1.0.${{ github.run_number }}
+          name: PDF Worker for Android 1.0.${{ github.run_number }}
+          make_latest: true
+          files: PDF-Worker.apk
+          body: |
+            Android app for PDF Worker, built from ${{ github.sha }}.
+
+            **Install:** download `PDF-Worker.apk` on your phone and open it. Android will ask you to allow installing apps from your browser or file manager the first time.

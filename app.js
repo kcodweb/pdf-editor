@@ -1819,7 +1819,8 @@ document.fonts.addEventListener('loadingdone', () => {
 });
 
 // Offline support (skipped on localhost so development always gets fresh files).
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+// The Android app already ships every file, so it doesn't need one.
+if ('serviceWorker' in navigator && location.protocol === 'https:' && !NATIVE_APP) {
   navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Offline mode unavailable', err));
 }
 

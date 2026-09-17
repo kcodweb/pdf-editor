@@ -775,6 +775,7 @@ function initToolPage() {
   $('tvAgain').addEventListener('click', () => openTool(tv.tool));
   $('tvRun').addEventListener('click', runTool);
   $('tvDownload').addEventListener('click', () => { if (tv.result) saveBlob(tv.result.blob, tv.result.name); });
+  $('tvShare').addEventListener('click', () => { if (tv.result && window.shareBlob) window.shareBlob(tv.result.blob, tv.result.name); });
   $('tvEditResult').addEventListener('click', async () => {
     const r = tv.result;
     if (!r || !r.editable) return;
@@ -817,7 +818,7 @@ function showResult(result) {
   setStage('done');
   $('tvDoneTitle').textContent = result.title;
   $('tvDoneDetail').textContent = result.detail || '';
-  $('tvDownload').textContent = `Download ${result.name.split('.').pop().toUpperCase()}`;
+  $('tvDownload').textContent = `${NATIVE_APP ? 'Save' : 'Download'} ${result.name.split('.').pop().toUpperCase()}`;
   $('tvEditResult').hidden = !(result.editable && result.blob.type === 'application/pdf');
   const isPdf = result.blob.type === 'application/pdf';
   const next = isPdf ? (tv.tool.next || []).map((id) => TOOL_BY_ID[id]).filter((t) => t && t.accept !== 'img' && t.accept !== 'docx') : [];

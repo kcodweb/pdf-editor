@@ -1,0 +1,8 @@
+{
+  "appId": "io.github.kcodweb.pdfworker",
+  "appName": "PDF Worker",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#f8fafc"
+  }
+}
