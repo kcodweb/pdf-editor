@@ -523,14 +523,17 @@ async function runOcr(pages, lang) {
     worker = await Tesseract.createWorker(lang, 1, {
       logger: (m) => {
         if (m.status === 'recognizing text') {
-          $('hint').textContent = `Recognizing text: page ${current + 1} of ${pages.length}… ${Math.round(m.progress * 100)}%`;
+          progress(`Recognizing text: page ${current + 1} of ${pages.length}… ${Math.round(m.progress * 100)}%`, (current + m.progress) / pages.length);
         } else if (m.status) {
-          $('hint').textContent = `Preparing text recognition (${m.status}${m.progress ? ` ${Math.round(m.progress * 100)}%` : ''})…`;
+          progress(`Preparing text recognition (${m.status}${m.progress ? ` ${Math.round(m.progress * 100)}%` : ''})…`, null);
         }
       },
     });
+    // Recognizing a page can take seconds, so Cancel stops the engine right away.
+    job.onCancel = () => worker && worker.terminate();
     let found = 0;
     for (current = 0; current < pages.length; current++) {
+      await checkpoint();
       const p = pages[current];
       const scale = Math.min(300 / 72, 3200 / Math.max(p.baseW, p.baseH));
       const canvas = await rasterizePage(p, scale);
@@ -547,9 +550,13 @@ async function runOcr(pages, lang) {
       : 'No readable text was found on those pages.');
     if (!$('searchbar').hidden && search.query.trim()) runSearch(search.query);
   } catch (err) {
-    console.error(err);
-    toast(err.message || 'Text recognition failed.');
+    if (isCancel(err) || job.cancelled) toast('Text recognition was cancelled. Pages finished so far keep their text.');
+    else {
+      console.error(err);
+      toast(err.message || 'Text recognition failed.');
+    }
   } finally {
+    job.onCancel = null;
     if (worker) worker.terminate();
     busy(false);
   }

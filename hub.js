@@ -178,6 +178,7 @@ const TOOLS = [
     run: async () => {
       const targets = $('tvOcrAll').checked ? [...state.pages] : await pagesWithoutText();
       if (targets.length) await runOcr([...new Map(targets.map((p) => [ocrKey(p), p])).values()], $('tvLang').value);
+      await checkpoint(); // stop here if recognition was cancelled
       const lines = state.pages.reduce((n, p) => n + (state.ocr[ocrKey(p)] || []).length, 0);
       const bytes = await buildFinalPdf(state.pages, {});
       const detail = targets.length ? `Recognized ${lines} lines of text on ${pages(targets.length)}` : 'Every page already had searchable text.';
@@ -299,7 +300,7 @@ const TOOLS = [
     run: async () => {
       const bytes = await buildFinalPdf(state.pages, {});
       const edit = $('tvAllowEdit').checked;
-      $('hint').textContent = 'Encrypting…';
+      progress('Encrypting…', null);
       const encrypted = await encryptPdf(bytes, {
         userPassword: $('tvPw').value,
         ownerPassword: randomPassword(),
@@ -370,6 +371,7 @@ async function maybeOcr() {
   if (!$('tvOcr').checked) return;
   const textless = await pagesWithoutText();
   if (textless.length) await runOcr([...new Map(textless.map((p) => [ocrKey(p), p])).values()], $('tvLang').value);
+  await checkpoint(); // stop here if recognition was cancelled
 }
 
 function splitPartsFor(quiet) {
@@ -673,7 +675,7 @@ function renderPageGrid() {
         <button type="button" data-act="rotr" title="Rotate right">${iconSvg('rotate')}</button>
         <button type="button" data-act="del" title="Delete page">&times;</button></div>` : ''}
       ${tool.select ? '<span class="pg-mark"></span>' : ''}`;
-    getThumb(p).then((url) => { const img = card.querySelector('img'); if (img) img.src = url; }).catch(() => {});
+    lazyThumb(card.querySelector('img'), p);
     main.appendChild(card);
   });
 }
@@ -813,8 +815,11 @@ async function runTool() {
     showResult(result);
     saveBlob(result.blob, result.name);
   } catch (err) {
-    console.error(err);
-    toast(err.message ? `Something went wrong: ${err.message}` : 'Something went wrong.');
+    if (isCancel(err)) toast('Cancelled.');
+    else {
+      console.error(err);
+      toast(err.message ? `Something went wrong: ${err.message}` : 'Something went wrong.');
+    }
   } finally {
     tv.running = false;
     showProgress(false);
@@ -833,10 +838,9 @@ function showResult(result) {
   $('tvNext').innerHTML = next.map((t) => `<a href="#/${t.id}" class="next-chip" data-next="${t.id}" style="--tool:${catColor(t.cat)}">${iconSvg(t.icon)}${escapeHtml(t.name)}</a>`).join('');
 }
 
-// Mirrors the engine's progress messages (#hint) while a tool page is busy.
+// Tool pages share the editor's progress card (busy/progress in app.js).
 function showProgress(on, text) {
-  $('tvProgress').hidden = !on;
-  if (text) $('tvProgressText').textContent = text;
+  busy(on, text);
 }
 
 function initHub() {
@@ -852,10 +856,6 @@ function initHub() {
   $('homeSearch').addEventListener('input', () => renderHome(filter, $('homeSearch').value));
   renderHome();
   initToolPage();
-
-  new MutationObserver(() => {
-    if (!$('tvProgress').hidden && $('hint').textContent) $('tvProgressText').textContent = $('hint').textContent;
-  }).observe($('hint'), { childList: true, characterData: true, subtree: true });
 
   window.addEventListener('hashchange', route);
   route();

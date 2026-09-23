@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached on install; fonts and pdf.js character maps are
 // cached the first time they're used. Bump VERSION when shipping changes to the app shell.
-const VERSION = 'pdf-editor-v8';
+const VERSION = 'pdf-editor-v9';
 // Text recognition (OCR) engine and language data are fetched on first use from these hosts.
 const CDN_HOSTS = ['cdnjs.cloudflare.com', 'cdn.jsdelivr.net'];
 

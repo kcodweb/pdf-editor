@@ -101,10 +101,6 @@
         </div>
       </div>
 
-      <div class="tv-progress" id="tvProgress" hidden>
-        <div class="spinner"></div>
-        <div id="tvProgressText">Working…</div>
-      </div>
     </section>
 
     <footer class="sitefoot">
@@ -547,6 +543,15 @@
 
 <div class="dropmask" id="dropmask" hidden><div>Drop files to open</div></div>
 <div class="toast" id="toast" hidden></div>
+
+<div class="job-overlay" id="jobOverlay" hidden>
+  <div class="job-card" role="status" aria-live="polite">
+    <div class="spinner"></div>
+    <div class="job-text" id="jobText">Working…</div>
+    <div class="job-track"><div class="job-bar indeterminate" id="jobBar"></div></div>
+    <button type="button" class="btn" id="jobCancel">Cancel</button>
+  </div>
+</div>
 
 <script src="vendor/pdf.min.js"></script>
 <script src="vendor/pdf-lib.min.js"></script>

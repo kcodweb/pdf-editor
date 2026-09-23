@@ -108,7 +108,8 @@ async function pdfToDocx(pages, { imagesForEmptyPages = true } = {}) {
   const children = [];
   const emptyPages = [];
   for (let i = 0; i < pages.length; i++) {
-    $('hint').textContent = `Converting page ${i + 1} of ${pages.length}…`;
+    progress(`Converting page ${i + 1} of ${pages.length}…`, (i + 1) / pages.length);
+    await checkpoint();
     const p = pages[i];
     const { w } = pageDims(p);
     const lines = await getLines(p);
@@ -185,6 +186,8 @@ async function pdfToDocx(pages, { imagesForEmptyPages = true } = {}) {
 async function pdfToText(pages) {
   const parts = [];
   for (let i = 0; i < pages.length; i++) {
+    progress(`Reading page ${i + 1} of ${pages.length}…`, (i + 1) / pages.length);
+    await checkpoint();
     const p = pages[i];
     const paragraphs = paragraphsFromLines(await getLines(p), pageDims(p).w);
     parts.push(paragraphs.map((q) => q.text).join('\n\n'));
@@ -297,7 +300,7 @@ async function docxToPdf(file) {
   host.className = 'docx-render-host';
   document.body.appendChild(host);
   try {
-    $('hint').textContent = 'Reading the document…';
+    progress('Reading the document…', null);
     await preview.renderAsync(file, host, host, {
       inWrapper: false, breakPages: true, ignoreLastRenderedPageBreak: false,
       renderHeaders: true, renderFooters: true, useBase64URL: true, experimental: true,
@@ -311,7 +314,8 @@ async function docxToPdf(file) {
     out.registerFontkit(fontkit);
     const fonts = new Map();
     for (let i = 0; i < pages.length; i++) {
-      $('hint').textContent = `Converting page ${i + 1} of ${pages.length}…`;
+      progress(`Converting page ${i + 1} of ${pages.length}…`, (i + 1) / pages.length);
+      await checkpoint();
       const page = pages[i];
       const wPt = page.offsetWidth * PX_TO_PT;
       const hPt = page.offsetHeight * PX_TO_PT;

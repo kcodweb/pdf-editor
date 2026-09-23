@@ -10,7 +10,7 @@ function createExportContext() {
 function loadSourceDoc(ctx, src) {
   if (!ctx.srcDocs.has(src)) {
     ctx.srcDocs.set(src, (async () => {
-      const doc = await PDFDocument.load(state.sources[src].bytes, { ignoreEncryption: true });
+      const doc = await PDFDocument.load(state.sources[src].bytes, { ignoreEncryption: true, parseSpeed: 1500 });
       doc.registerFontkit(fontkit);
       await applyFormValues(doc, src);
       detachWidgetPages(doc);
@@ -38,6 +38,8 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
   let formSource = null;
   for (const [src, list] of bySource) {
     const doc = await loadSourceDoc(ctx, src);
+    await doc.flush();
+    const srcPages = doc.getPages();
     let remaining = list;
     while (remaining.length) {
       const batch = [];
@@ -47,8 +49,14 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
         if (used.has(p.index)) later.push(p);
         else { used.add(p.index); batch.push(p); }
       }
-      const copied = await out.copyPages(doc, batch.map((p) => p.index));
-      batch.forEach((p, i) => copiedFor.set(p, copied[i]));
+      // Same as pdf-lib's copyPages, but with pauses so long documents don't freeze the page.
+      // One copier per batch keeps shared resources (fonts, images) copied only once.
+      const copier = PDFLib.PDFObjectCopier.for(doc.context, out.context);
+      for (const [n, p] of batch.entries()) {
+        const node = copier.copy(srcPages[p.index].node);
+        copiedFor.set(p, PDFLib.PDFPage.of(node, out.context.register(node), out));
+        if (n % 25 === 24) await checkpoint();
+      }
       remaining = later;
     }
     if (state.sources[src].hasForm && !formSource) formSource = doc;
@@ -56,7 +64,9 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
 
   const added = [];
   const total = state.pages.length;
-  for (const p of pages) {
+  for (const [k, p] of pages.entries()) {
+    if (!opts.quietProgress && pages.length > 1) progress(`Building PDF… page ${k + 1} of ${pages.length}`, ((k + 1) / pages.length) * 0.9);
+    await checkpoint();
     const page = p.src === null ? out.addPage([p.baseW, p.baseH]) : out.addPage(copiedFor.get(p));
     page.setRotation(degrees((p.rot0 + p.rot) % 360));
     const index = state.pages.indexOf(p);
@@ -96,7 +106,9 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
     }
   }
   if (opts.compress && opts.compress !== 'none') await compressImages(out, opts.compress);
-  return out.save({ updateFieldAppearances: false });
+  if (!opts.quietProgress) progress('Saving…', 0.95);
+  await checkpoint();
+  return out.save({ updateFieldAppearances: false, objectsPerTick: 200 });
 }
 
 /* ---------------- permanent removal ---------------- */
@@ -122,7 +134,8 @@ async function buildFinalPdf(pages, opts = {}, ctx = createExportContext()) {
   const fonts = new Map();
   try {
     for (const i of secure) {
-      $('hint').textContent = `Removing hidden content… page ${secure.indexOf(i) + 1} of ${secure.length}`;
+      progress(`Removing hidden content… page ${secure.indexOf(i) + 1} of ${secure.length}`, (secure.indexOf(i) + 1) / secure.length);
+      await checkpoint();
       const p = pages[i];
       const page = await rendered.getPage(i + 1);
       const vp = page.getViewport({ scale: SECURE_DPI / 72 });
@@ -156,7 +169,7 @@ async function buildFinalPdf(pages, opts = {}, ctx = createExportContext()) {
     rendered.destroy();
   }
   if (opts.compress && opts.compress !== 'none') await compressImages(out, opts.compress);
-  return out.save();
+  return out.save({ objectsPerTick: 200 });
 }
 
 const isWidget = (dict) => dict instanceof PDFLib.PDFDict
@@ -528,10 +541,13 @@ async function compressImages(out, level) {
   const { maxDim, quality } = level === 'strong' ? { maxDim: 1200, quality: 0.55 } : { maxDim: 2000, quality: 0.75 };
   const name = (n) => PDFName.of(n);
 
-  for (const [ref, obj] of [...out.context.enumerateIndirectObjects()]) {
+  const objects = [...out.context.enumerateIndirectObjects()];
+  for (const [n, [ref, obj]] of objects.entries()) {
     if (!(obj instanceof PDFRawStream)) continue;
     const dict = obj.dict;
     if (String(dict.get(name('Subtype'))) !== '/Image') continue;
+    progress('Shrinking images…', n / objects.length);
+    await checkpoint();
     const filter = dict.lookup(name('Filter'));
     const filterName = filter instanceof PDFArray ? (filter.size() === 1 ? String(filter.get(0)) : '') : String(filter);
     if (!['/DCTDecode', '/FlateDecode'].includes(filterName) || dict.has(name('Decode')) || dict.has(name('ImageMask'))) continue;
@@ -599,6 +615,11 @@ async function compressImages(out, level) {
 
 /* ---------------- downloads ---------------- */
 
+// Zips with a progress readout; zipping big files takes a moment.
+function zipBlob(zip) {
+  return zip.generateAsync({ type: 'blob' }, (meta) => progress(`Zipping… ${Math.round(meta.percent)}%`, meta.percent / 100));
+}
+
 function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -637,6 +658,7 @@ async function runDownload(pages, filename, opts = {}) {
     if (warnings.length) msg += `. Note: ${warnings.join(', ')}.`;
     toast(msg);
   } catch (err) {
+    if (isCancel(err)) { toast('Download cancelled.'); return; }
     console.error(err);
     toast(`Couldn't build the PDF: ${err.message}`);
   } finally {
@@ -726,11 +748,11 @@ async function buildSplitZip(parts) {
   const zip = new JSZip();
   const ctx = createExportContext();
   for (let i = 0; i < parts.length; i++) {
-    $('hint').textContent = `Splitting… part ${i + 1} of ${parts.length}`;
-    const bytes = await buildFinalPdf(parts[i].map((idx) => state.pages[idx]), {}, ctx);
+    progress(`Splitting… part ${i + 1} of ${parts.length}`, (i + 1) / (parts.length + 1));
+    const bytes = await buildFinalPdf(parts[i].map((idx) => state.pages[idx]), { quietProgress: true }, ctx);
     zip.file(`${String(i + 1).padStart(2, '0')}-${state.fileName}-p${pagesLabel(parts[i])}.pdf`, bytes);
   }
-  return zip.generateAsync({ type: 'blob' });
+  return zipBlob(zip);
 }
 
 async function runSplit(parts) {
@@ -741,6 +763,7 @@ async function runSplit(parts) {
     saveBlob(blob, `${state.fileName}-split.zip`);
     toast(`Downloaded ${parts.length} PDFs as ${state.fileName}-split.zip`);
   } catch (err) {
+    if (isCancel(err)) { toast('Split cancelled.'); return; }
     console.error(err);
     toast(`Couldn't split the PDF: ${err.message}`);
   } finally {
@@ -772,7 +795,8 @@ async function renderPagesToImages(pages, format, dpi) {
     const digits = String(state.pages.length).length;
     const files = [];
     for (let i = 0; i < pages.length; i++) {
-      $('hint').textContent = `Rendering page ${i + 1} of ${pages.length}…`;
+      progress(`Rendering page ${i + 1} of ${pages.length}…`, (i + 1) / pages.length);
+      await checkpoint();
       const page = await doc.getPage(i + 1);
       const vp = page.getViewport({ scale: dpi / 72 });
       const canvas = document.createElement('canvas');
@@ -806,10 +830,11 @@ async function runImageExport(pages, format, dpi) {
       const zip = new JSZip();
       files.forEach((f) => zip.file(f.name, f.blob));
       const name = `${state.fileName}-images.zip`;
-      saveBlob(await zip.generateAsync({ type: 'blob' }), name);
+      saveBlob(await zipBlob(zip), name);
       toast(`Downloaded ${files.length} images as ${name}`);
     }
   } catch (err) {
+    if (isCancel(err)) { toast('Cancelled.'); return; }
     console.error(err);
     toast(`Couldn't create the images: ${err.message}`);
   } finally {

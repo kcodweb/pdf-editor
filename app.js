@@ -116,9 +116,66 @@ function toast(msg) {
   toastTimer = setTimeout(() => (t.hidden = true), 4500);
 }
 
+/* ---------------- long-running work ---------------- */
+
+// Long jobs (building, splitting, OCR, converting…) show a progress card with a Cancel button,
+// and yield to the browser regularly so the page stays responsive. busy() calls can nest.
+class CancelledError extends Error {
+  constructor() {
+    super('Cancelled');
+    this.name = 'CancelledError';
+  }
+}
+const isCancel = (err) => !!err && err.name === 'CancelledError';
+const job = { depth: 0, cancelled: false, onCancel: null };
+
 function busy(on, msg) {
-  document.body.classList.toggle('busy', on);
-  $('hint').textContent = on ? msg : (state.pages.length ? TOOL_HINTS[state.tool] : '');
+  job.depth = Math.max(0, job.depth + (on ? 1 : -1));
+  const active = job.depth > 0;
+  if (on && job.depth === 1) {
+    job.cancelled = false;
+    job.onCancel = null;
+    $('jobCancel').disabled = false;
+  }
+  document.body.classList.toggle('busy', active);
+  $('jobOverlay').hidden = !active;
+  if (on) progress(msg, null);
+  else if (!active) $('hint').textContent = state.pages.length ? TOOL_HINTS[state.tool] : '';
+}
+
+// Updates the progress card. fraction: 0..1, or null when the length of the work is unknown.
+function progress(text, fraction) {
+  if (text) {
+    $('hint').textContent = text;
+    if (!job.cancelled) $('jobText').textContent = text;
+  }
+  if (fraction === undefined) return;
+  const bar = $('jobBar');
+  const known = fraction !== null && Number.isFinite(fraction);
+  bar.classList.toggle('indeterminate', !known);
+  bar.style.width = known ? `${Math.round(clamp(fraction, 0, 1) * 100)}%` : '';
+}
+
+// Lets the browser paint and handle input; throws CancelledError once Cancel was pressed.
+const yieldChannel = new MessageChannel();
+const yieldWaiters = [];
+yieldChannel.port1.onmessage = () => { const resolve = yieldWaiters.shift(); if (resolve) resolve(); };
+let lastYield = 0;
+async function checkpoint() {
+  if (job.cancelled) throw new CancelledError();
+  if (performance.now() - lastYield > 30) {
+    await new Promise((resolve) => { yieldWaiters.push(resolve); yieldChannel.port2.postMessage(0); });
+    lastYield = performance.now();
+    if (job.cancelled) throw new CancelledError();
+  }
+}
+
+function cancelJob() {
+  if (!job.depth || job.cancelled) return;
+  job.cancelled = true;
+  $('jobText').textContent = 'Cancelling…';
+  $('jobCancel').disabled = true;
+  try { if (job.onCancel) job.onCancel(); } catch { /* best effort */ }
 }
 
 const MODALS = ['pwModal', 'sigModal', 'dlModal', 'splitModal', 'decorModal', 'imgModal', 'ocrModal', 'keysModal'];
@@ -412,6 +469,8 @@ async function loadPdfFiles(files, replace) {
       try { hasForm = !!(await pdf.getFieldObjects()); } catch { /* no form */ }
       const pages = [];
       for (let i = 0; i < pdf.numPages; i++) {
+        if (pdf.numPages > 30) progress(`Opening ${file.name}… page ${i + 1} of ${pdf.numPages}`, (i + 1) / pdf.numPages);
+        await checkpoint();
         const page = await pdf.getPage(i + 1);
         const vp = page.getViewport({ scale: 1 });
         pages.push({ id: uid(), index: i, baseW: vp.width, baseH: vp.height, rot0: page.rotate % 360, rot: 0, annots: [] });
@@ -439,6 +498,10 @@ async function loadPdfFiles(files, replace) {
       toast(`Added ${n} page${n === 1 ? '' : 's'}.`);
     }
     return true;
+  } catch (err) {
+    if (!isCancel(err)) throw err;
+    toast('Opening was cancelled.');
+    return false;
   } finally {
     busy(false);
   }
@@ -453,7 +516,9 @@ async function addImagePages(files, replace, { size = 'letter', orientation = 'a
   try {
     if (replace) resetDocument(files[0].name.replace(/\.[^.]+$/, '') || 'images');
     const pages = [];
-    for (const file of files) {
+    for (const [n, file] of files.entries()) {
+      if (files.length > 3) progress(`Adding images… ${n + 1} of ${files.length}`, (n + 1) / files.length);
+      await checkpoint();
       try {
         const imageId = await importImageFile(file);
         const im = state.images[imageId];
@@ -490,6 +555,9 @@ async function addImagePages(files, replace, { size = 'letter', orientation = 'a
     if (replace) autoFit();
     if (!replace && !quietLoad) scrollToPage(state.pages[first].id);
     if (!quietLoad) toast(`Added ${pages.length} image page${pages.length === 1 ? '' : 's'}.`);
+  } catch (err) {
+    if (!isCancel(err)) throw err;
+    toast('Adding images was cancelled.');
   } finally {
     busy(false);
   }
@@ -796,6 +864,21 @@ function getThumb(p) {
   return job;
 }
 
+// Thumbnails render only when scrolled near, so long documents open quickly.
+const thumbObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    thumbObserver.unobserve(entry.target);
+    const p = findPage(entry.target.dataset.pid);
+    if (p) getThumb(p).then((url) => { entry.target.src = url; }).catch(() => {});
+  }
+}, { rootMargin: '600px' });
+function lazyThumb(img, p) {
+  if (!img) return;
+  img.dataset.pid = p.id;
+  thumbObserver.observe(img);
+}
+
 function renderThumbs() {
   thumbsEl.replaceChildren();
   state.pages.forEach((p, i) => {
@@ -811,8 +894,7 @@ function renderThumbs() {
     const svg = svgEl('svg', { class: 'thumb-overlay', viewBox: `0 0 ${w} ${h}` });
     svg.append(svgEl('g', { class: 'decor' }), svgEl('g', { class: 'root', transform: `matrix(${rotMatrix(p.rot, p.baseW, p.baseH).join(' ')})` }));
     item.querySelector('.thumb-page').appendChild(svg);
-    const img = item.querySelector('img');
-    getThumb(p).then((url) => { img.src = url; }).catch(() => {});
+    lazyThumb(item.querySelector('img'), p);
     thumbsEl.appendChild(item);
     renderThumbOverlay(p, svg);
   });
@@ -1780,6 +1862,7 @@ $('btnZoomIn').addEventListener('click', () => setZoom(state.zoom * 1.2));
 $('btnZoomOut').addEventListener('click', () => setZoom(state.zoom / 1.2));
 $('btnFit').addEventListener('click', fitWidth);
 $('btnDownload').addEventListener('click', openDownloadDialog);
+$('jobCancel').addEventListener('click', cancelJob);
 document.querySelectorAll('.tool').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
 
 $('btnPickAll').addEventListener('click', () => {
