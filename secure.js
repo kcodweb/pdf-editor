@@ -9,7 +9,7 @@ const secureCalls = new Map();
 
 function secureCall(type, bytes, options = {}) {
   if (!secureWorker) {
-    const lib = new URL('vendor/pdf-lib-secure.min.js', location.href).href;
+    const lib = new URL('vendor/pdf-lib-secure.min.js', document.baseURI).href; // tool pages use <base href="../">
     const source = `importScripts(${JSON.stringify(lib)});
       self.onmessage = async (e) => {
         const { id, type, bytes, options } = e.data;

@@ -6,7 +6,8 @@
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
     "sync": "npm run build:web && npx cap sync android",
-    "icons": "python scripts/make_icons.py"
+    "icons": "python scripts/make_icons.py",
+    "pages": "node scripts/build-pages.mjs && python scripts/make_og.py"
   },
   "dependencies": {
     "@capacitor/android": "^7.6.9",

@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://kcodweb.github.io/pdf-editor/sitemap.xml

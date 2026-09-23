@@ -543,7 +543,8 @@ function showView(view) {
 }
 
 function route() {
-  const id = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
+  // Tool pages (e.g. merge-pdf/) open their own tool when there's no route in the address.
+  const id = decodeURIComponent(location.hash.replace(/^#\/?/, '')) || document.body.dataset.defaultTool || '';
   if (tv.running) return;
   if (id === 'edit') {
     showView('editor');
@@ -568,7 +569,8 @@ function renderHome(filter = 'all', query = '') {
   for (const t of tools) {
     const a = document.createElement('a');
     a.className = 'tool-card';
-    a.href = `#/${t.id}`;
+    // Links go to the tool's own page (good for search engines); the Android app has no such pages.
+    a.href = !NATIVE_APP && TOOL_SLUGS[t.id] ? `${TOOL_SLUGS[t.id]}/` : `#/${t.id}`;
     a.style.setProperty('--tool', catColor(t.cat));
     a.innerHTML = `<span class="tool-icon">${iconSvg(t.icon)}</span><span class="tool-name">${escapeHtml(t.name)}</span><span class="tool-desc">${escapeHtml(t.desc)}</span>`;
     grid.appendChild(a);
@@ -592,10 +594,12 @@ function openTool(tool) {
   tv.batchMode = false;
   tv.crop = null;
   tv.result = null;
-  document.title = `${tool.name} — PDF Worker`;
+  // A tool's own page keeps its search-friendly title.
+  if (document.body.dataset.defaultTool !== tool.id) document.title = `${tool.name} — PDF Worker`;
   $('toolView').style.setProperty('--tool', catColor(tool.cat));
   $('tvIcon').innerHTML = iconSvg(tool.icon);
   $('tvName').textContent = tool.name;
+  $('toolSeo').hidden = $('toolSeo').dataset.tool !== tool.id;
   $('tvDesc').textContent = tool.desc;
   const accept = ACCEPT[tool.accept];
   $('tvChoose').textContent = `Select ${accept.label} file${tool.multiple ? 's' : ''}`;

@@ -2,27 +2,28 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<base href="../">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
-<title>PDF Worker — Free online PDF tools that keep your files private</title>
-<meta name="description" content="Merge, split, compress, convert, edit, sign and protect PDFs in your browser. Free, no sign-up, and your files never leave your device.">
+<title>Redact PDF – Permanently black out sensitive information</title>
+<meta name="description" content="Black out names, numbers and other sensitive text so it's truly removed from the file, not just covered. Free and private.">
 <!-- seo:start -->
-<link rel="canonical" href="https://kcodweb.github.io/pdf-editor/">
+<link rel="canonical" href="https://kcodweb.github.io/pdf-editor/redact-pdf/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="PDF Worker">
-<meta property="og:title" content="PDF Worker – Free online PDF tools that keep your files private">
-<meta property="og:description" content="Merge, split, compress, convert, edit, sign and protect PDFs in your browser. Free, no sign-up, and your files never leave your device.">
-<meta property="og:url" content="https://kcodweb.github.io/pdf-editor/">
-<meta property="og:image" content="https://kcodweb.github.io/pdf-editor/og/home.png">
+<meta property="og:title" content="Redact PDF – Permanently black out sensitive information">
+<meta property="og:description" content="Black out names, numbers and other sensitive text so it's truly removed from the file, not just covered. Free and private.">
+<meta property="og:url" content="https://kcodweb.github.io/pdf-editor/redact-pdf/">
+<meta property="og:image" content="https://kcodweb.github.io/pdf-editor/og/redact-pdf.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<script type="application/ld+json">{"@context": "https://schema.org", "@type": "WebApplication", "name": "PDF Worker", "url": "https://kcodweb.github.io/pdf-editor/", "applicationCategory": "BusinessApplication", "operatingSystem": "Any (web browser), Android", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "description": "Merge, split, compress, convert, edit, sign and protect PDFs in your browser. Files never leave your device."}</script>
+<script type="application/ld+json">[{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Redact PDF – PDF Worker","applicationCategory":"BusinessApplication","operatingSystem":"Any (web browser), Android","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"description":"Black out names, numbers and other sensitive text so it's truly removed from the file, not just covered. Free and private.","url":"https://kcodweb.github.io/pdf-editor/redact-pdf/"},{"@context":"https://schema.org","@type":"HowTo","name":"How to use Redact PDF","step":[{"@type":"HowToStep","position":1,"text":"Open your PDF."},{"@type":"HowToStep","position":2,"text":"Drag over what to remove, or use Find → Redact all."},{"@type":"HowToStep","position":3,"text":"Download – the content is removed for good."}]},{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is the text really gone?","acceptedAnswer":{"@type":"Answer","text":"Yes. Pages with redactions are rebuilt as images, and only the text that's still visible is kept searchable."}},{"@type":"Question","name":"Are my files uploaded?","acceptedAnswer":{"@type":"Answer","text":"No. PDF Worker runs entirely in your browser – your files are processed on your own device and never sent to a server."}},{"@type":"Question","name":"Is it free?","acceptedAnswer":{"@type":"Answer","text":"Yes. There's no account, no watermark and no daily limit."}},{"@type":"Question","name":"Does it work on my phone?","acceptedAnswer":{"@type":"Answer","text":"Yes, in any modern mobile browser, and there's also an Android app."}}]}]</script>
 <!-- seo:end -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2h8l5 5v15H6z'/%3E%3Cpath d='M14 2v5h5M9 13h7M9 17h5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
-<body data-view="home">
+<body data-view="tool" data-default-tool="redact">
 <div class="site" id="site">
   <header class="sitebar">
     <a class="brand" href="#/">
@@ -125,7 +126,13 @@
         </div>
       </div>
 
-      <div id="toolSeo" hidden></div>
+      <section class="seo-info" id="toolSeo" data-tool="redact">
+        <h2>Redact information securely: redacted pages are flattened so the hidden text can't be copied or recovered.</h2>
+        <h3>How to use Redact PDF</h3>
+        <ol><li>Open your PDF.</li><li>Drag over what to remove, or use Find → Redact all.</li><li>Download – the content is removed for good.</li></ol>
+        <h3>Questions and answers</h3>
+        <dl><dt>Is the text really gone?</dt><dd>Yes. Pages with redactions are rebuilt as images, and only the text that's still visible is kept searchable.</dd><dt>Are my files uploaded?</dt><dd>No. PDF Worker runs entirely in your browser – your files are processed on your own device and never sent to a server.</dd><dt>Is it free?</dt><dd>Yes. There's no account, no watermark and no daily limit.</dd><dt>Does it work on my phone?</dt><dd>Yes, in any modern mobile browser, and there's also an Android app.</dd></dl>
+      </section>
     </section>
 
     <footer class="sitefoot">
