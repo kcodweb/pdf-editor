@@ -32,42 +32,73 @@ function pdfLines(p) {
   return lineCache.get(key);
 }
 
+// Rotated text: a line's geometry lives in its own frame, turned `angle` degrees (clockwise,
+// 0/90/180/270) about the page origin, so within that frame it's ordinary left-to-right text.
+// Text annotations made from such lines carry the same `angle`.
+function rotatePoint(x, y, deg) {
+  if (!deg) return { x, y };
+  const r = (deg * Math.PI) / 180;
+  const c = Math.round(Math.cos(r) * 1e9) / 1e9;
+  const s = Math.round(Math.sin(r) * 1e9) / 1e9;
+  return { x: c * x - s * y, y: s * x + c * y };
+}
+// Bounding box of `r` after turning it `deg` degrees about the origin.
+function rotateRect(r, deg) {
+  if (!deg) return r;
+  const pts = [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].map(([x, y]) => rotatePoint(x, y, deg));
+  const xs = pts.map((q) => q.x);
+  const ys = pts.map((q) => q.y);
+  return { ...r, x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+}
+
 function groupLines(content, vp) {
   const frags = [];
   for (const item of content.items) {
     if (!item.str || !item.transform) continue;
     const tx = pdfjsLib.Util.transform(vp.transform, item.transform);
     const size = Math.hypot(tx[2], tx[3]);
-    if (size < 2 || Math.abs(Math.atan2(tx[1], tx[0])) > 0.02) continue; // horizontal text only
+    if (size < 2) continue;
+    // Straight text only: horizontal, or turned a quarter, half or three-quarter turn.
+    const deg = (Math.atan2(tx[1], tx[0]) * 180) / Math.PI;
+    const quarter = Math.round(deg / 90) * 90;
+    if (Math.abs(deg - quarter) > 1.2) continue;
+    const angle = ((quarter % 360) + 360) % 360;
+    const at = rotatePoint(tx[4], tx[5], -angle);
     const style = content.styles[item.fontName] || {};
-    frags.push({ x: tx[4], baseline: tx[5], size, w: item.width, str: item.str, fontName: item.fontName, generic: style.fontFamily || '' });
+    frags.push({ x: at.x, baseline: at.y, angle, size, w: item.width, str: item.str, fontName: item.fontName, generic: style.fontFamily || '' });
   }
 
-  // Rows share a baseline; within a row, fragments close together form a line.
-  frags.sort((a, b) => a.baseline - b.baseline);
+  // Rows share a direction and a baseline; within a row, fragments close together form a line.
+  frags.sort((a, b) => a.angle - b.angle || a.baseline - b.baseline);
   const rows = [];
   for (const f of frags) {
     const row = rows[rows.length - 1];
-    if (row && Math.abs(f.baseline - row.baseline) < row.size * 0.35) row.items.push(f);
-    else rows.push({ baseline: f.baseline, size: f.size, items: [f] });
+    if (row && row.angle === f.angle && Math.abs(f.baseline - row.baseline) < row.size * 0.35) row.items.push(f);
+    else rows.push({ angle: f.angle, baseline: f.baseline, size: f.size, items: [f] });
   }
 
   const lines = [];
   for (const row of rows) {
     row.items.sort((a, b) => a.x - b.x);
     let cur = null;
+    let spaced = false;
     for (const f of row.items) {
+      // pdf.js bridges wide gaps (table columns, tab stops) with whitespace items; measure the
+      // gap between the real text instead so separate columns stay separate lines.
+      if (!f.str.trim()) { spaced = true; continue; }
       const gap = cur ? f.x - (cur.x + cur.w) : 0;
       if (cur && gap < cur.size * 1.5 && gap > -cur.size * 0.5 && Math.abs(f.size - cur.size) < cur.size * 0.3) {
-        if (gap > cur.size * 0.12 && !/\s$/.test(cur.text) && !/^\s/.test(f.str)) cur.text += ' ';
+        if ((spaced || gap > cur.size * 0.12) && !/\s$/.test(cur.text) && !/^\s/.test(f.str)) cur.text += ' ';
+        spaced = false;
         cur.text += f.str;
         cur.w = Math.max(cur.w, f.x + f.w - cur.x);
         // A line mixing fonts can't be redrawn in a single original font.
         if (f.str.trim() && f.fontName !== cur.fontName) cur.mixedFonts = true;
       } else {
         if (cur) lines.push(cur);
+        spaced = false;
         cur = f.str.trim()
-          ? { x: f.x, baseline: f.baseline, size: f.size, w: f.w, text: f.str, fontName: f.fontName, generic: f.generic }
+          ? { x: f.x, baseline: f.baseline, size: f.size, w: f.w, text: f.str, fontName: f.fontName, generic: f.generic, ...(f.angle ? { angle: f.angle } : {}) }
           : null;
       }
     }
@@ -112,16 +143,20 @@ async function buildTextLayer(el, p) {
     span.dataset.line = i;
     span.textContent = l.text;
     const family = genericCss(l);
+    const top = l.baseline - l.size * 0.92;
     Object.assign(span.style, {
       left: `${l.x}px`,
-      top: `${l.baseline - l.size * 0.92}px`,
+      top: `${top}px`,
       fontSize: `${l.size}px`,
       lineHeight: `${l.size * 1.2}px`,
       fontFamily: family,
     });
     measureCtx.font = `${l.size}px ${family}`;
     const natural = measureCtx.measureText(l.text).width;
-    if (natural > 0) span.style.transform = `scaleX(${l.w / natural})`;
+    const stretch = natural > 0 ? `scaleX(${l.w / natural})` : '';
+    if (l.angle) {
+      Object.assign(span.style, { left: '0', top: '0', transformOrigin: '0 0', transform: `rotate(${l.angle}deg) translate(${l.x}px, ${top}px) ${stretch}` });
+    } else if (stretch) span.style.transform = stretch;
     layer.append(span, document.createElement('br'));
   });
 }
@@ -340,7 +375,7 @@ async function startReplaceEdit(p, line) {
   const top = line.baseline - line.size * 0.92;
   const height = line.size * 1.2;
   // Clicking a line that was already edited reopens that edit.
-  const existing = p.annots.find((a) => a.type === 'text' && a.cover
+  const existing = p.annots.find((a) => a.type === 'text' && a.cover && (a.angle || 0) === (line.angle || 0)
     && a.cover.x < line.x + line.w && a.cover.x + a.cover.w > line.x
     && Math.abs(a.cover.y + a.cover.h / 2 - (top + height / 2)) < line.size * 0.5);
   if (existing) {
@@ -348,13 +383,14 @@ async function startReplaceEdit(p, line) {
     return;
   }
   const snap = snapshot();
-  const [style, colors] = await Promise.all([lineFontStyle(p, line), sampleColors(p, { x: line.x, y: top, w: line.w, h: height })]);
+  const [style, colors] = await Promise.all([lineFontStyle(p, line), sampleColors(p, rotateRect({ x: line.x, y: top, w: line.w, h: height }, line.angle))]);
   const pad = Math.max(1, line.size * 0.08);
   const a = {
     id: uid(), type: 'text', text: line.text, color: colors.text, ...style,
     x: line.x, y: line.baseline - line.size * 0.8, size: Math.round(line.size * 10) / 10,
     cover: { x: line.x - pad, y: top - pad / 2, w: line.w + pad * 2, h: height + pad, fill: colors.bg },
   };
+  if (line.angle) a.angle = line.angle;
   p.annots.push(a);
   startEdit(p, a, true, snap);
 }
@@ -389,7 +425,7 @@ function coverRects(p) {
   const rects = [];
   for (const a of p.annots) {
     if (a.type === 'rect' && (a.kind === 'whiteout' || a.kind === 'redact')) rects.push({ x: a.x, y: a.y, w: a.w, h: a.h, from: a });
-    if (a.type === 'text' && a.cover) rects.push({ ...a.cover, from: a });
+    if (a.type === 'text' && a.cover) rects.push({ ...a.cover, angle: a.angle || 0, from: a });
   }
   return rects;
 }
@@ -398,6 +434,8 @@ function coverRects(p) {
 function visibleSegments(line, rects, measure) {
   const top = line.baseline - line.size * 0.8;
   const bottom = line.baseline + line.size * 0.2;
+  // Compare in the line's own frame (rotated lines, rotated edit covers).
+  rects = rects.map((r) => rotateRect(r, (r.angle || 0) - (line.angle || 0)));
   const hits = rects.filter((r) => r.y < bottom && r.y + r.h > top && r.x < line.x + line.w && r.x + r.w > line.x);
   if (!hits.length) return [{ text: line.text, x: line.x, w: line.w }];
   const at = lineMeasurer(line, measure);
@@ -429,21 +467,22 @@ async function readableText(p, { includePdfText = true } = {}) {
   const rects = coverRects(p);
   const items = [];
   const lines = includePdfText ? await getLines(p) : (state.ocr[ocrKey(p)] || []);
+  // Items are in the base frame; rotated ones say how far they're turned (`angle`).
+  const push = (seg, line) => {
+    const at = rotatePoint(seg.x, line.baseline, line.angle || 0);
+    items.push({ text: seg.text, x: at.x, baseline: at.y, size: line.size, w: seg.w, angle: line.angle || 0 });
+  };
   for (const line of lines) {
-    for (const seg of visibleSegments(line, rects, genericMeasure(line))) {
-      items.push({ text: seg.text, x: seg.x, baseline: line.baseline, size: line.size, w: seg.w });
-    }
+    for (const seg of visibleSegments(line, rects, genericMeasure(line))) push(seg, line);
   }
   if (includePdfText) {
     for (const a of p.annots) {
       if (a.type !== 'text') continue;
       a.text.split('\n').forEach((text, i) => {
         if (!text.trim()) return;
-        const line = { text, x: a.x, baseline: a.y + a.size * (0.8 + 1.2 * i), size: a.size, w: textWidth(text, a) };
+        const line = { text, x: a.x, baseline: a.y + a.size * (0.8 + 1.2 * i), size: a.size, w: textWidth(text, a), angle: a.angle || 0 };
         const others = rects.filter((r) => r.from !== a && p.annots.indexOf(r.from) > p.annots.indexOf(a));
-        for (const seg of visibleSegments(line, others, (s) => textWidth(s, a))) {
-          items.push({ text: seg.text, x: seg.x, baseline: line.baseline, size: line.size, w: seg.w });
-        }
+        for (const seg of visibleSegments(line, others, (s) => textWidth(s, a))) push(seg, line);
       });
     }
   }
@@ -583,7 +622,7 @@ const search = { query: '', hits: [], index: -1, token: 0, textless: 0 };
 function matchRect(line, start, end) {
   const at = lineMeasurer(line, genericMeasure(line));
   const x0 = line.x + at(start);
-  return { x: x0, y: line.baseline - line.size * 0.88, w: Math.max(2, line.x + at(end) - x0), h: line.size * 1.12 };
+  return rotateRect({ x: x0, y: line.baseline - line.size * 0.88, w: Math.max(2, line.x + at(end) - x0), h: line.size * 1.12 }, line.angle);
 }
 
 function openSearch() {

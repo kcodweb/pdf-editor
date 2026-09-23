@@ -153,6 +153,120 @@ async function splitRuns(text, primaryFile) {
   return runs;
 }
 
+// ---- Right-to-left text ----
+// A compact version of the Unicode bidi algorithm: enough for Arabic/Hebrew mixed with
+// English and numbers on one line. The line's direction comes from its first strong letter
+// (like dir="auto"). Returns the font runs in left-to-right drawing order. Runs in an RTL
+// script keep their logical order because fontkit reverses (and shapes) those itself.
+const RTL_RANGES = [[0x0590, 0x08FF], [0xFB1D, 0xFDFF], [0xFE70, 0xFEFF]];
+const MIRROR = { '(': ')', ')': '(', '[': ']', ']': '[', '{': '}', '}': '{', '<': '>', '>': '<', '«': '»', '»': '«', '‹': '›', '›': '‹' };
+
+function bidiType(ch) {
+  const cp = ch.codePointAt(0);
+  if ((cp >= 0x0660 && cp <= 0x0669) || (cp >= 0x06F0 && cp <= 0x06F9)) return 'A'; // Arabic-Indic digits
+  if (/\p{M}/u.test(ch)) return 'M';
+  if (inRanges(cp, RTL_RANGES)) return 'R';
+  if (/\p{Nd}/u.test(ch)) return 'N';
+  if (/\p{L}/u.test(ch)) return 'L';
+  return 'O';
+}
+
+const hasRtl = (text) => [...text].some((ch) => bidiType(ch) === 'R');
+const lineIsRtl = (text) => {
+  for (const ch of text) {
+    const t = bidiType(ch);
+    if (t === 'R') return true;
+    if (t === 'L') return false;
+  }
+  return false;
+};
+
+function bidiLevels(chars) {
+  const types = chars.map(bidiType);
+  const base = types.find((t) => t === 'R' || t === 'L') === 'R' ? 1 : 0;
+  const baseDir = base ? 'R' : 'L';
+  // Direction of each strong-ish character; numbers follow the preceding letters.
+  const dirs = new Array(chars.length).fill(null);
+  let prev = baseDir;
+  types.forEach((t, i) => {
+    if (t === 'R' || t === 'L') prev = dirs[i] = t;
+    else if (t === 'N') dirs[i] = prev;
+    else if (t === 'A') dirs[i] = 'R';
+  });
+  // Bracket pairs resolve together (rule N0): to the line's direction if that appears inside
+  // them, else to the other direction when it's both inside and just before the pair.
+  const stack = [];
+  const pairs = [];
+  chars.forEach((ch, i) => {
+    if ('([{'.includes(ch)) stack.push([ch, i]);
+    else if (')]}'.includes(ch)) {
+      const k = stack.map(([c]) => c).lastIndexOf('([{'[')]}'.indexOf(ch)]);
+      if (k >= 0) { pairs.push([stack[k][1], i]); stack.length = k; }
+    }
+  });
+  pairs.sort((x, y) => x[0] - y[0]);
+  for (const [open, close] of pairs) {
+    const inside = new Set(dirs.slice(open + 1, close).filter(Boolean));
+    if (!inside.size) continue;
+    let dir = baseDir;
+    if (!inside.has(baseDir)) {
+      let before = baseDir;
+      for (let k = open - 1; k >= 0; k--) if (dirs[k]) { before = dirs[k]; break; }
+      if (before !== baseDir) dir = before;
+    }
+    dirs[open] = dirs[close] = dir;
+  }
+  const levelOf = (dir, t) => (dir === 'R' ? (t === 'N' || t === 'A' ? 2 : 1) : base ? 2 : 0);
+  const levels = new Array(chars.length);
+  for (let i = 0; i < chars.length; i++) {
+    const t = types[i];
+    if (dirs[i]) { levels[i] = levelOf(dirs[i], t); continue; }
+    if (t === 'M') { levels[i] = i ? levels[i - 1] : base; continue; }
+    // Neutral run: takes the direction of both sides when they agree, else the line's.
+    let j = i;
+    while (j < chars.length && !dirs[j]) j++;
+    const before = i ? dirs[i - 1] || baseDir : baseDir;
+    const after = j < chars.length ? dirs[j] : baseDir;
+    const lvl = levelOf(before === after ? before : baseDir, 'O');
+    for (let k = i; k < j; k++) levels[k] = types[k] === 'M' && k > i ? levels[k - 1] : lvl;
+    i = j - 1;
+  }
+  return levels;
+}
+
+function visualRuns(runs) {
+  const chars = [];
+  for (const run of runs) for (const ch of run.text) chars.push({ ch, file: run.file });
+  if (!chars.some((c) => bidiType(c.ch) === 'R')) return runs; // nothing to reorder
+  const levels = bidiLevels(chars.map((c) => c.ch));
+  chars.forEach((c, i) => { c.level = levels[i]; });
+  // Group into (level, font) pieces in logical order, then reverse the pieces level by level.
+  let pieces = [];
+  for (const c of chars) {
+    const last = pieces[pieces.length - 1];
+    if (last && last.level === c.level && last.file === c.file) last.chars.push(c.ch);
+    else pieces.push({ level: c.level, file: c.file, chars: [c.ch] });
+  }
+  const top = Math.max(...pieces.map((p) => p.level));
+  for (let lvl = top; lvl >= 1; lvl--) {
+    const outp = [];
+    for (let i = 0; i < pieces.length;) {
+      if (pieces[i].level < lvl) { outp.push(pieces[i++]); continue; }
+      let j = i;
+      while (j < pieces.length && pieces[j].level >= lvl) j++;
+      outp.push(...pieces.slice(i, j).reverse());
+      i = j;
+    }
+    pieces = outp;
+  }
+  return pieces.map((p) => {
+    let chs = p.chars;
+    // Odd (RTL) pieces fontkit won't reverse itself: flip them here and mirror brackets.
+    if (p.level % 2 && !chs.some((ch) => bidiType(ch) === 'R')) chs = chs.map((ch) => MIRROR[ch] || ch).reverse();
+    return { file: p.file, text: chs.join('') };
+  });
+}
+
 // The single font that can draw the most of `text` (form field appearances can only use one font).
 async function fontCoveringText(text) {
   const chars = [...new Set([...text])].filter((ch) => ch !== '\n' && !IGNORABLE.test(ch));

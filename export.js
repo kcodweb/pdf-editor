@@ -174,7 +174,7 @@ async function buildFinalPdf(pages, opts = {}, ctx = createExportContext()) {
       await drawHiddenText(out, flat, items, fonts, (it) => ({
         x: m[0] * it.x + m[2] * it.baseline + m[4],
         y: h - (m[1] * it.x + m[3] * it.baseline + m[5]),
-        angle,
+        angle: angle - (it.angle || 0),
       }));
       out.removePage(i + 1);
     }
@@ -303,7 +303,7 @@ function pdfFont(out, file, fonts) {
 // Draws one line of text in any script, switching fonts per character run.
 // x/y: baseline anchor (y up). align: left | center | right, measured along the text direction.
 async function drawTextLine(out, page, fonts, text, o) {
-  const runs = await splitRuns(text, o.file);
+  const runs = visualRuns(await splitRuns(text, o.file));
   const measured = [];
   let total = 0;
   for (const run of runs) {
@@ -353,6 +353,14 @@ async function drawAnnotations(out, page, p, fonts, images) {
 
   for (const a of p.annots) {
     if (a.type === 'text') {
+      if (a.angle) {
+        // Draw in the text's own frame: turn by `angle` about the base origin (y-down), expressed
+        // in this y-up drawing frame.
+        const r = (a.angle * Math.PI) / 180;
+        const c = Math.round(Math.cos(r) * 1e9) / 1e9;
+        const s = Math.round(Math.sin(r) * 1e9) / 1e9;
+        page.pushOperators(pushGraphicsState(), concatTransformationMatrix(c, -s, s, c, -s * Bh, Bh * (1 - c)));
+      }
       if (a.cover) {
         const c = a.cover;
         page.drawRectangle({ x: c.x, y: Bh - c.y - c.h, width: c.w, height: c.h, color: hexToRgb(c.fill) });
@@ -370,6 +378,7 @@ async function drawAnnotations(out, page, p, fonts, images) {
           });
         }
       }
+      if (a.angle) page.pushOperators(popGraphicsState());
     } else if (a.type === 'ink') {
       page.drawSvgPath(inkPath(a.points), {
         x: 0, y: Bh, borderColor: hexToRgb(a.color), borderWidth: a.width,

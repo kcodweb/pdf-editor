@@ -38,7 +38,7 @@ const canvasToJpeg = (canvas, quality) => new Promise((resolve) => canvas.toBlob
 function displayedTextPlacer(p, h) {
   const m = rotMatrix(p.rot, p.baseW, p.baseH);
   const angle = (Math.atan2(-m[1], m[0]) * 180) / Math.PI;
-  return (it) => ({ x: m[0] * it.x + m[2] * it.baseline + m[4], y: h - (m[1] * it.x + m[3] * it.baseline + m[5]), angle });
+  return (it) => ({ x: m[0] * it.x + m[2] * it.baseline + m[4], y: h - (m[1] * it.x + m[3] * it.baseline + m[5]), angle: angle - (it.angle || 0) });
 }
 
 /* ---------------- grayscale ---------------- */

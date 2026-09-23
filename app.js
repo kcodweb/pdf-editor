@@ -302,7 +302,7 @@ function annotBounds(a) {
     case 'text': {
       const lines = a.text.split('\n');
       const w = Math.max(...lines.map((l) => textWidth(l, a)), a.size * 0.5);
-      return { x: a.x, y: a.y, w, h: lines.length * a.size * 1.2 };
+      return rotateRect({ x: a.x, y: a.y, w, h: lines.length * a.size * 1.2 }, a.angle);
     }
     case 'ink': {
       const xs = a.points.map((p) => p[0]);
@@ -326,6 +326,7 @@ function annotBounds(a) {
 }
 
 function translateAnnot(a, orig, dx, dy) {
+  if (a.angle) ({ x: dx, y: dy } = rotatePoint(dx, dy, -a.angle)); // rotated text moves in its own frame
   if (a.type === 'ink') a.points = orig.points.map(([x, y]) => [x + dx, y + dy]);
   else if (a.type === 'line') Object.assign(a, { x1: orig.x1 + dx, y1: orig.y1 + dy, x2: orig.x2 + dx, y2: orig.y2 + dy });
   else { a.x = orig.x + dx; a.y = orig.y + dy; }
@@ -705,7 +706,7 @@ function renderOverlay(p) {
     g.replaceChildren();
     for (const a of p.annots) {
       if (editing && editing.annotId === a.id) {
-        if (a.cover) g.appendChild(coverEl(a.cover));
+        if (a.cover) g.appendChild(coverEl(a.cover, a.angle));
         continue;
       }
       g.appendChild(annotEl(a));
@@ -721,10 +722,11 @@ function renderOverlay(p) {
   renderThumbOverlay(p);
 }
 
-const coverEl = (c) => svgEl('rect', { class: 'cover', x: c.x, y: c.y, width: c.w, height: c.h, fill: c.fill });
+const coverEl = (c, angle) => svgEl('rect', { class: 'cover', x: c.x, y: c.y, width: c.w, height: c.h, fill: c.fill, ...(angle ? { transform: `rotate(${angle})` } : {}) });
 
 function annotEl(a) {
   const wrap = svgEl('g', { 'data-aid': a.id, class: `annot annot-${a.type}` });
+  if (a.angle) wrap.setAttribute('transform', `rotate(${a.angle})`);
   switch (a.type) {
     case 'text': {
       if (a.cover) wrap.appendChild(coverEl(a.cover));
@@ -740,7 +742,9 @@ function annotEl(a) {
       });
       a.text.split('\n').forEach((line, i) => {
         const ts = svgEl('tspan', { x: a.x, y: a.y + a.size * (0.8 + 1.2 * i) });
-        ts.textContent = (useOrig ? origScreenText(info, line) : line) || ' ';
+        const shown = (useOrig ? origScreenText(info, line) : line) || ' ';
+        // Lay out lines that start in Arabic/Hebrew right-to-left, as the export does.
+        ts.textContent = lineIsRtl(line) ? `\u202B${shown}\u202C` : shown;
         t.appendChild(ts);
       });
       wrap.appendChild(t);
@@ -1524,12 +1528,13 @@ function startEdit(p, a, isNew, snap) {
   renderOverlay(p);
 
   const el = pageElOf(p.id);
-  const at = pagePoint(el, a.x, a.y - a.size * 0.2);
+  const corner = rotatePoint(a.x, a.y - a.size * 0.2, a.angle || 0);
+  const at = pagePoint(el, corner.x, corner.y);
   const ta = document.createElement('textarea');
   ta.className = 'text-editor';
   ta.spellcheck = false;
   ta.value = a.text;
-  Object.assign(ta.style, { left: `${at.x}px`, top: `${at.y}px`, transform: `rotate(${p.rot}deg)` });
+  Object.assign(ta.style, { left: `${at.x}px`, top: `${at.y}px`, transform: `rotate(${p.rot + (a.angle || 0)}deg)` });
   styleEditor(ta, a);
   ta.addEventListener('input', () => { a.text = ta.value; styleEditor(ta, a); });
   ta.addEventListener('keydown', (ev) => {
@@ -1573,7 +1578,8 @@ function finishEdit() {
       const i = p.annots.indexOf(a);
       if (a.cover) {
         // Emptying an existing line erases it.
-        p.annots.splice(i, 1, { id: a.id, type: 'rect', kind: 'whiteout', x: a.cover.x, y: a.cover.y, w: a.cover.w, h: a.cover.h, fill: a.cover.fill });
+        const c = rotateRect(a.cover, a.angle);
+        p.annots.splice(i, 1, { id: a.id, type: 'rect', kind: 'whiteout', x: c.x, y: c.y, w: c.w, h: c.h, fill: c.fill });
         pushHistory(ed.snap);
       } else {
         p.annots.splice(i, 1);
@@ -1833,6 +1839,7 @@ const MENU_ACTIONS = {
   open: () => openPicker(),
   add: () => { $('fileMerge').value = ''; $('fileMerge').click(); },
   blank: () => addBlankPage(),
+  theme: () => cycleTheme(),
 };
 
 $('btnMore').addEventListener('click', () => toggleMenu());
@@ -1845,6 +1852,41 @@ $('moreMenu').addEventListener('click', (e) => {
 document.addEventListener('pointerdown', (e) => {
   if (!$('moreMenu').hidden && !e.target.closest('.menu-wrap')) toggleMenu(false);
 });
+
+/* ---------------- theme ---------------- */
+
+// 'system' follows the OS setting; the choice is remembered. The early script in index.html
+// applies it before first paint. PDF pages always render on white.
+const THEMES = ['system', 'light', 'dark'];
+function currentTheme() {
+  const t = document.documentElement.dataset.theme;
+  return t === 'light' || t === 'dark' ? t : 'system';
+}
+function applyTheme(theme) {
+  if (theme === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('theme', theme); } catch { /* private mode */ }
+  syncTheme();
+}
+function cycleTheme() {
+  applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  toast(`Theme: ${currentTheme()[0].toUpperCase()}${currentTheme().slice(1)}`);
+}
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+function syncTheme() {
+  const theme = currentTheme();
+  const name = theme[0].toUpperCase() + theme.slice(1);
+  document.documentElement.classList.toggle('dark', theme === 'dark' || (theme === 'system' && darkQuery.matches));
+  $('menuTheme').textContent = `Theme: ${name}`;
+  for (const b of document.querySelectorAll('[data-theme-toggle]')) {
+    b.dataset.current = theme;
+    b.title = `Theme: ${name} (click to change)`;
+  }
+  const meta = document.querySelector('meta[name=theme-color]');
+  if (meta) meta.content = getComputedStyle(document.body).getPropertyValue('--panel').trim() || '#ffffff';
+}
+darkQuery.addEventListener('change', syncTheme);
+for (const b of document.querySelectorAll('[data-theme-toggle]')) b.addEventListener('click', cycleTheme);
 
 /* ---------------- wiring ---------------- */
 
@@ -1990,6 +2032,7 @@ initSignature();
 initExportDialogs();
 initTextLayer();
 initSearch();
+syncTheme();
 initOcr();
 initDecor();
 updateUI();

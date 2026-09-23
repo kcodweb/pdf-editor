@@ -74,11 +74,97 @@ function paragraphsFromLines(lines, pageWidth) {
     }
     para.text = text;
     para.size = para.lines[0].size;
-    const first = para.lines[0];
-    const center = first.x + first.w / 2;
-    para.centered = para.lines.length <= 2 && first.w < pageWidth * 0.7 && Math.abs(center - pageWidth / 2) < pageWidth * 0.06;
+    para.centered = para.lines.length <= 2 && para.lines.every((l) => l.w < pageWidth * 0.7
+      && Math.abs(l.x + l.w / 2 - pageWidth / 2) < pageWidth * 0.03 + l.size);
   }
   return paragraphs;
+}
+
+// Finds tables: runs of rows where text sits in the same columns. Returns the page split into
+// segments in reading order, each either { lines } (ordinary text) or { table: [[cellLines…]…] }.
+function findTables(lines) {
+  const sorted = [...lines].sort((a, b) => a.baseline - b.baseline || a.x - b.x);
+  const rows = [];
+  for (const l of sorted) {
+    const row = rows[rows.length - 1];
+    if (row && Math.abs(l.baseline - row.baseline) < row.size * 0.35) row.cells.push(l);
+    else rows.push({ baseline: l.baseline, size: l.size, cells: [l] });
+  }
+  for (const r of rows) r.cells.sort((a, b) => a.x - b.x);
+
+  // Columns = gaps in the text that every row of the block leaves open.
+  const columnsOf = (block) => {
+    const spans = block.flatMap((r) => r.cells.map((c) => [c.x, c.x + c.w])).sort((a, b) => a[0] - b[0]);
+    const cols = [];
+    for (const [a, b] of spans) {
+      const last = cols[cols.length - 1];
+      if (last && a <= last[1] + 2) last[1] = Math.max(last[1], b);
+      else cols.push([a, b]);
+    }
+    return cols;
+  };
+  const colIndex = (cols, cell) => cols.findIndex(([a, b]) => cell.x >= a - 1 && cell.x <= b);
+
+  const segments = [];
+  const pushLines = (ls) => {
+    const last = segments[segments.length - 1];
+    if (last && last.lines) last.lines.push(...ls);
+    else segments.push({ lines: [...ls] });
+  };
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].cells.length < 2) { pushLines(rows[i++].cells); continue; }
+    // Grow a block of multi-cell rows (single-cell rows may be wrapped cell text) while columns hold.
+    let j = i + 1;
+    let cols = columnsOf([rows[i]]);
+    while (j < rows.length) {
+      const gap = rows[j].baseline - rows[j - 1].baseline;
+      if (gap > Math.max(rows[j - 1].size, rows[j].size) * 3) break;
+      const next = columnsOf(rows.slice(i, j + 1));
+      if (next.length < 2 || next.length < Math.min(cols.length, 3)) break;
+      if (rows[j].cells.length < 2) {
+        // A lone line only belongs if another multi-cell row follows it within the block.
+        let k = j + 1;
+        while (k < rows.length && rows[k].cells.length < 2 && k - j < 3) k++;
+        if (k >= rows.length || rows[k].cells.length < 2) break;
+      }
+      cols = next;
+      j++;
+    }
+    while (j > i && rows[j - 1].cells.length < 2) j--; // don't end on a lone line
+    // …unless it sits right under the last row: that's the last cell's wrapped text.
+    while (j < rows.length && rows[j].cells.length === 1 && rows[j].baseline - rows[j - 1].baseline < rows[j].size * 1.45
+      && colIndex(cols, rows[j].cells[0]) >= 0) j++;
+    const block = rows.slice(i, j);
+    // A header left-aligned over right-aligned numbers leaves a gap inside one column:
+    // join neighbouring columns that no row uses both of.
+    for (let k = cols.length - 2; k >= 0; k--) {
+      const near = cols[k + 1][0] - cols[k][1] < block[0].size * 2.5;
+      const both = block.some((r) => r.cells.some((c) => colIndex(cols, c) === k) && r.cells.some((c) => colIndex(cols, c) === k + 1));
+      if (near && !both) cols.splice(k, 2, [cols[k][0], cols[k + 1][1]]);
+    }
+    const multi = block.filter((r) => r.cells.length >= 2);
+    const avgLen = multi.reduce((n, r) => n + r.cells.reduce((m, c) => m + c.text.length, 0) / r.cells.length, 0) / (multi.length || 1);
+    // Two long-text columns is a two-column page layout, not a table.
+    const isTable = multi.length >= 2 && cols.length >= 2 && !(cols.length === 2 && avgLen > 45);
+    if (!isTable) { pushLines(rows[i++].cells); continue; }
+    // Build the grid; a row with fewer cells right under the previous one continues its cells.
+    const grid = [];
+    let prev = null;
+    for (const r of block) {
+      const cells = cols.map(() => []);
+      for (const c of r.cells) cells[Math.max(0, colIndex(cols, c))].push(c);
+      const filled = cells.filter((c) => c.length).length;
+      const tight = prev && r.baseline - prev.baseline < r.size * 1.45;
+      if (grid.length && tight && filled < Math.max(2, grid[grid.length - 1].filter((c) => c.length).length)) {
+        cells.forEach((c, k) => grid[grid.length - 1][k].push(...c));
+      } else grid.push(cells);
+      prev = r;
+    }
+    segments.push({ table: grid, cols });
+    i = j;
+  }
+  return segments;
 }
 
 async function lineStylesFor(p, lines) {
@@ -112,38 +198,79 @@ async function pdfToDocx(pages, { imagesForEmptyPages = true } = {}) {
     await checkpoint();
     const p = pages[i];
     const { w } = pageDims(p);
-    const lines = await getLines(p);
+    const allLines = await getLines(p);
+    const lines = allLines.filter((l) => !l.angle);
+    const turned = allLines.filter((l) => l.angle);
     const pageBreak = i > 0;
-    if (!lines.length) {
+    if (!allLines.length) {
       emptyPages.push({ p, index: children.length, pageBreak });
       children.push(null); // filled with an image below
       continue;
     }
-    const styles = await lineStylesFor(p, lines);
-    const paragraphs = paragraphsFromLines(lines, w);
+    const styles = await lineStylesFor(p, allLines);
+    const segments = findTables(lines);
+    if (turned.length) segments.push({ lines: turned.map((l, k) => ({ ...l, x: 0, baseline: 1e6 + k * 1e3 })) });
     // Body text size = the size used by the most characters on the page.
     const chars = new Map();
-    for (const q of paragraphs) chars.set(Math.round(q.size), (chars.get(Math.round(q.size)) || 0) + q.text.length);
+    for (const l of lines) chars.set(Math.round(l.size), (chars.get(Math.round(l.size)) || 0) + l.text.length);
     const body = [...chars.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 11;
-    paragraphs.forEach((para, k) => {
-      const style = styles.get(para.lines[0]) || {};
-      const ratio = para.size / body;
-      const heading = ratio >= 1.6 ? D.HeadingLevel.HEADING_1 : ratio >= 1.25 ? D.HeadingLevel.HEADING_2 : undefined;
-      children.push(new D.Paragraph({
-        heading,
-        pageBreakBefore: pageBreak && k === 0,
-        alignment: para.centered ? D.AlignmentType.CENTER : undefined,
-        spacing: { after: Math.round(Math.min(para.size, 14) * 8) },
-        children: [new D.TextRun({
-          text: para.text,
-          size: Math.max(2, Math.round(para.size * 2)),
-          bold: style.bold || undefined,
-          italics: style.italic || undefined,
-          font: WORD_FONTS[style.family] || 'Arial',
-          color: heading ? '000000' : undefined,
-        })],
-      }));
+    let first = pageBreak;
+    const run = (text, size, style, extra = {}) => new D.TextRun({
+      text,
+      size: Math.max(2, Math.round(size * 2)),
+      bold: style.bold || undefined,
+      italics: style.italic || undefined,
+      font: WORD_FONTS[style.family] || 'Arial',
+      ...extra,
     });
+    for (const seg of segments) {
+      if (seg.table) {
+        const widths = seg.cols.map(([a], k) => (seg.cols[k + 1] ? seg.cols[k + 1][0] : seg.cols[k][1] + 6) - a);
+        const total = widths.reduce((x, y) => x + y, 0);
+        const usable = 9000; // twips between the page margins, roughly
+        if (first) { children.push(new D.Paragraph({ pageBreakBefore: true, children: [] })); first = false; }
+        children.push(new D.Table({
+          width: { size: 100, type: D.WidthType.PERCENTAGE },
+          columnWidths: widths.map((x) => Math.round((x / total) * usable)),
+          rows: seg.table.map((cells) => new D.TableRow({
+            children: cells.map((cellLines, k) => {
+              const sortedLines = [...cellLines].sort((a, b) => a.baseline - b.baseline || a.x - b.x);
+              const text = sortedLines.map((l) => l.text.trim()).join(' ');
+              const l0 = sortedLines[0];
+              // Numbers and centered headings keep their alignment inside the cell.
+              const [a, b] = seg.cols[k];
+              const mid = l0 ? l0.x + l0.w / 2 : 0;
+              const alignment = !l0 ? undefined
+                : /^[-+(]?[\d$€£¥.,%\s)]+$/.test(text) && Math.abs(l0.x + l0.w - b) < 3 && l0.x - a > 3 ? D.AlignmentType.RIGHT
+                  : Math.abs(mid - (a + b) / 2) < 3 && l0.x - a > 3 ? D.AlignmentType.CENTER : undefined;
+              return new D.TableCell({
+                width: { size: Math.round((widths[k] / total) * usable), type: D.WidthType.DXA },
+                margins: { top: 40, bottom: 40, left: 80, right: 80 },
+                children: [new D.Paragraph({
+                  alignment,
+                  children: l0 ? [run(text, l0.size, styles.get(l0) || {})] : [],
+                })],
+              });
+            }),
+          })),
+        }));
+        children.push(new D.Paragraph({ children: [], spacing: { after: 120 } }));
+        continue;
+      }
+      paragraphsFromLines(seg.lines, w).forEach((para) => {
+        const style = styles.get(para.lines[0]) || {};
+        const ratio = para.size / body;
+        const heading = ratio >= 1.6 ? D.HeadingLevel.HEADING_1 : ratio >= 1.25 ? D.HeadingLevel.HEADING_2 : undefined;
+        children.push(new D.Paragraph({
+          heading,
+          pageBreakBefore: first || undefined,
+          alignment: para.centered ? D.AlignmentType.CENTER : undefined,
+          spacing: { after: Math.round(Math.min(para.size, 14) * 8) },
+          children: [run(para.text, para.size, style, { color: heading ? '000000' : undefined })],
+        }));
+        first = false;
+      });
+    }
   }
   // Pages with no text (images, drawings) come across as pictures.
   if (emptyPages.length && imagesForEmptyPages) {
@@ -189,8 +316,13 @@ async function pdfToText(pages) {
     progress(`Reading page ${i + 1} of ${pages.length}…`, (i + 1) / pages.length);
     await checkpoint();
     const p = pages[i];
-    const paragraphs = paragraphsFromLines(await getLines(p), pageDims(p).w);
-    parts.push(paragraphs.map((q) => q.text).join('\n\n'));
+    // Tables come out one row per line with tab-separated cells (pastes into a spreadsheet).
+    const all = await getLines(p);
+    const turned = all.filter((l) => l.angle).map((l) => l.text);
+    const blocks = findTables(all.filter((l) => !l.angle)).map((seg) => (seg.table
+      ? seg.table.map((row) => row.map((cell) => [...cell].sort((a, b) => a.baseline - b.baseline).map((l) => l.text.trim()).join(' ')).join('\t')).join('\n')
+      : paragraphsFromLines(seg.lines, pageDims(p).w).map((q) => q.text).join('\n\n')));
+    parts.push([...blocks, ...turned].join('\n\n'));
   }
   return new Blob([parts.join('\n\n\f\n\n')], { type: 'text/plain;charset=utf-8' });
 }
