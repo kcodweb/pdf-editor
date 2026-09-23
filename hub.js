@@ -26,6 +26,12 @@ const ICONS = {
   redact: '<rect x="3" y="8" width="18" height="8" rx="1" fill="currentColor"/><path d="M3 4h10M3 20h7M15 20h6"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/>',
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 017.5-2"/>',
+  compare: '<rect x="3" y="4" width="8" height="16" rx="1"/><rect x="13" y="4" width="8" height="16" rx="1"/><path d="M5.5 9h3M5.5 13h3M15.5 9h3M15.5 13h3"/>',
+  crop: '<path d="M6 2v16h16"/><path d="M2 6h16v16"/>',
+  nup: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18M3 12h18"/>',
+  grayscale: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 010 18z" fill="currentColor"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.6v.4"/>',
+  sheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/>',
 };
 
 const CATEGORIES = [
@@ -33,7 +39,7 @@ const CATEGORIES = [
   { id: 'optimize', name: 'Optimize', color: '#16a34a' },
   { id: 'to-pdf', name: 'Convert to PDF', color: '#ca8a04' },
   { id: 'from-pdf', name: 'Convert from PDF', color: '#2563eb' },
-  { id: 'edit', name: 'Edit & sign', color: '#7c3aed' },
+  { id: 'edit', name: 'Edit & review', color: '#7c3aed' },
   { id: 'security', name: 'Security', color: '#475569' },
 ];
 
@@ -42,10 +48,11 @@ const ACCEPT = {
   pdf: { attr: 'application/pdf,.pdf', label: 'PDF', test: (f) => isPdfFile(f) },
   pdfimg: { attr: 'application/pdf,.pdf,image/*', label: 'PDF or image', test: (f) => isPdfFile(f) || isImageFile(f) },
   img: { attr: 'image/*', label: 'image', test: (f) => isImageFile(f) },
+  sheet: { attr: '.xlsx,.xlsm,.xls,.csv,.ods', label: 'spreadsheet', test: (f) => /\.(xlsx|xlsm|xls|csv|ods)$/i.test(f.name) },
   docx: { attr: '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document', label: 'Word (.docx)', test: (f) => /\.docx$/i.test(f.name) },
 };
 
-const tv = { tool: null, files: [], sel: new Set(), result: null, carry: null, running: false };
+const tv = { tool: null, files: [], sel: new Set(), result: null, carry: null, running: false, batchMode: false, crop: null };
 
 /* ---------------- tool catalog ---------------- */
 
@@ -148,7 +155,57 @@ const TOOLS = [
     run: async () => pdfResult(await buildFinalPdf(state.pages, {}), `${state.fileName}-rotated.pdf`, 'Pages rotated', pages(state.pages.length)),
   },
   {
-    id: 'compress', cat: 'optimize', icon: 'compress', name: 'Compress PDF', accept: 'pdf', kind: 'single',
+    id: 'crop', cat: 'organize', icon: 'crop', name: 'Crop PDF', accept: 'pdf', kind: 'crop',
+    desc: 'Trim page margins, or cut pages down to just the part you need.',
+    cta: 'Crop PDF', next: ['compress', 'n-up'],
+    options: () => `
+      <p class="muted small">Drag the edges or corners of the box on the page. Everything outside it is cut off.</p>
+      <div class="btn-row"><button type="button" class="btn" id="tvCropAuto">Detect margins</button><button type="button" class="btn" id="tvCropReset">Reset</button></div>
+      <div class="opt-title">Apply to</div>
+      <label class="radio"><input type="radio" name="tvCropScope" value="all" checked><span>All pages</span></label>
+      <label class="radio"><input type="radio" name="tvCropScope" value="page"><span>Only the page shown</span></label>
+      <label class="radio"><input type="radio" name="tvCropScope" value="auto"><span>Trim white margins on each page separately</span></label>`,
+    run: async () => {
+      const scope = document.querySelector('input[name=tvCropScope]:checked').value;
+      let boxes;
+      if (scope === 'auto') {
+        boxes = [];
+        for (const [i, p] of state.pages.entries()) {
+          progress(`Measuring margins… page ${i + 1} of ${state.pages.length}`, (i + 1) / state.pages.length);
+          await checkpoint();
+          const canvas = await rasterizePage(p, 0.5);
+          boxes.push(contentBounds(canvas));
+          canvas.width = canvas.height = 0;
+        }
+      } else if (scope === 'page') {
+        boxes = state.pages.map((_, i) => (i === tv.crop.page ? tv.crop.box : null));
+      } else {
+        boxes = state.pages.map(() => tv.crop.box);
+      }
+      const bytes = await cropPdf(state.pages, boxes);
+      return pdfResult(bytes, `${state.fileName}-cropped.pdf`, 'Your PDF is cropped', pages(state.pages.length));
+    },
+  },
+  {
+    id: 'n-up', cat: 'organize', icon: 'nup', name: 'Pages per sheet', accept: 'pdf', kind: 'single', multiple: true, batch: true,
+    desc: 'Save paper when printing: put 2, 4, 6, 9 or 16 pages on each sheet.',
+    cta: 'Create PDF', next: ['compress'],
+    options: () => `
+      <label class="stack-field"><span>Pages per sheet</span><select id="tvNup" class="text-input">
+        <option value="2">2</option><option value="4" selected>4</option><option value="6">6</option><option value="9">9</option><option value="16">16</option></select></label>
+      <label class="stack-field"><span>Sheet size</span><select id="tvNupSize" class="text-input"><option value="a4">A4</option><option value="letter">US Letter</option></select></label>
+      <label class="stack-field"><span>Orientation</span><select id="tvNupOrient" class="text-input">
+        <option value="auto">Automatic</option><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
+      <label class="check"><input type="checkbox" id="tvNupBorders" checked> Thin border around each page</label>`,
+    run: async () => {
+      const per = Number($('tvNup').value);
+      const bytes = await nUpPdf(state.pages, { perSheet: per, size: $('tvNupSize').value, orientation: $('tvNupOrient').value, borders: $('tvNupBorders').checked });
+      const sheets = Math.ceil(state.pages.length / per);
+      return pdfResult(bytes, `${state.fileName}-${per}-per-sheet.pdf`, 'Your sheets are ready', `${pages(state.pages.length)} on ${sheets} sheet${sheets === 1 ? '' : 's'}`);
+    },
+  },
+  {
+    id: 'compress', cat: 'optimize', icon: 'compress', name: 'Compress PDF', accept: 'pdf', kind: 'single', multiple: true, batch: true,
     desc: 'Make PDFs smaller by shrinking images, while keeping text sharp.',
     cta: 'Compress PDF', next: ['protect', 'merge', 'pdf-to-jpg'],
     options: () => `
@@ -168,6 +225,16 @@ const TOOLS = [
       }
       return pdfResult(bytes, `${state.fileName}-compressed.pdf`, 'Your PDF is compressed', detail);
     },
+  },
+  {
+    id: 'grayscale', cat: 'optimize', icon: 'grayscale', name: 'Grayscale PDF', accept: 'pdf', kind: 'single', multiple: true, batch: true,
+    desc: 'Turn color pages black and white for printing. Text stays searchable.',
+    cta: 'Convert to grayscale', next: ['compress', 'n-up'],
+    options: () => `
+      <label class="stack-field"><span>Quality</span><select id="tvGrayDpi" class="text-input">
+        <option value="150">Standard (150 DPI)</option><option value="200" selected>High (200 DPI)</option><option value="300">Print (300 DPI)</option></select></label>
+      <p class="muted small">Pages are redrawn in shades of gray with an invisible text layer, so text can still be searched and copied.</p>`,
+    run: async () => pdfResult(await grayscalePdf(state.pages, Number($('tvGrayDpi').value)), `${state.fileName}-grayscale.pdf`, 'Your PDF is now grayscale', pages(state.pages.length)),
   },
   {
     id: 'ocr', cat: 'optimize', icon: 'ocr', name: 'OCR PDF', accept: 'pdfimg', multiple: true, kind: 'single',
@@ -205,6 +272,23 @@ const TOOLS = [
     },
   },
   {
+    id: 'excel-to-pdf', cat: 'to-pdf', icon: 'sheet', name: 'Excel to PDF', accept: 'sheet', kind: 'files',
+    desc: 'Convert spreadsheets (.xlsx, .xls, .csv, .ods) to PDF, every sheet included.',
+    cta: 'Convert to PDF', next: ['compress', 'merge'],
+    options: () => `
+      <label class="stack-field"><span>Orientation</span><select id="tvSheetOrient" class="text-input">
+        <option value="auto">Automatic (wide sheets in landscape)</option><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
+      <label class="check"><input type="checkbox" id="tvSheetHeader" checked> Repeat the first row on every page</label>
+      <label class="check"><input type="checkbox" id="tvSheetGrid" checked> Show gridlines</label>
+      <p class="muted small">Wide sheets are scaled to fit the page width. Cell colors and charts aren't included.</p>`,
+    run: async () => {
+      const file = tv.files[0].file;
+      const bytes = await sheetsToPdf(file, { orientation: $('tvSheetOrient').value, repeatHeader: $('tvSheetHeader').checked, gridlines: $('tvSheetGrid').checked });
+      const name = file.name.replace(/\.[^.]+$/, '');
+      return pdfResult(bytes, `${name}.pdf`, 'Your spreadsheet is now a PDF', null, name);
+    },
+  },
+  {
     id: 'word-to-pdf', cat: 'to-pdf', icon: 'word', name: 'Word to PDF', accept: 'docx', kind: 'files',
     desc: 'Convert Word documents (.docx) to PDF, with searchable text.',
     cta: 'Convert to PDF', next: ['compress', 'merge', 'protect'],
@@ -217,7 +301,7 @@ const TOOLS = [
     },
   },
   {
-    id: 'pdf-to-jpg', cat: 'from-pdf', icon: 'toImage', name: 'PDF to JPG / PNG', accept: 'pdf', kind: 'single',
+    id: 'pdf-to-jpg', cat: 'from-pdf', icon: 'toImage', name: 'PDF to JPG / PNG', accept: 'pdf', kind: 'single', multiple: true, batch: true,
     desc: 'Save every page as an image.',
     cta: 'Convert to images', next: ['jpg-to-pdf', 'compress'],
     options: () => `
@@ -236,7 +320,7 @@ const TOOLS = [
     },
   },
   {
-    id: 'pdf-to-word', cat: 'from-pdf', icon: 'word', name: 'PDF to Word', accept: 'pdf', kind: 'single',
+    id: 'pdf-to-word', cat: 'from-pdf', icon: 'word', name: 'PDF to Word', accept: 'pdf', kind: 'single', multiple: true, batch: true,
     desc: 'Turn a PDF into an editable Word document (.docx).',
     cta: 'Convert to Word', next: ['pdf-to-text', 'compress'],
     options: () => `
@@ -250,7 +334,7 @@ const TOOLS = [
     },
   },
   {
-    id: 'pdf-to-text', cat: 'from-pdf', icon: 'text', name: 'PDF to Text', accept: 'pdf', kind: 'single',
+    id: 'pdf-to-text', cat: 'from-pdf', icon: 'text', name: 'PDF to Text', accept: 'pdf', kind: 'single', multiple: true, batch: true,
     desc: 'Extract all the text from a PDF into a plain .txt file.',
     cta: 'Extract text', next: ['pdf-to-word'],
     options: () => `
@@ -260,6 +344,52 @@ const TOOLS = [
       await maybeOcr();
       const blob = await pdfToText(state.pages);
       return { blob, name: `${state.fileName}.txt`, title: 'Your text is ready', detail: formatBytes(blob.size) };
+    },
+  },
+  {
+    id: 'compare', cat: 'edit', icon: 'compare', name: 'Compare PDF', accept: 'pdf', multiple: true, kind: 'files', maxFiles: 2, fileLabels: ['Original', 'Changed'],
+    desc: 'See what changed between two versions of a document, page by page.',
+    cta: 'Compare', next: [],
+    options: () => `
+      <p class="muted small" id="tvCmpInfo">Add two PDFs: the original first, then the changed version.</p>
+      <label class="check"><input type="checkbox" id="tvCmpAll"> Include pages without changes</label>`,
+    onOptions: () => {
+      $('tvRun').disabled = tv.files.length !== 2;
+      $('tvCmpInfo').textContent = tv.files.length === 2
+        ? 'The report outlines changed areas in red and lists the words that were added or removed.'
+        : 'Add two PDFs: the original first, then the changed version.';
+    },
+    run: async () => {
+      const r = await comparePdfs(tv.files[0].file, tv.files[1].file, { includeUnchanged: $('tvCmpAll').checked });
+      return pdfResult(r.bytes, 'comparison-report.pdf', r.title, r.detail, null, false);
+    },
+  },
+  {
+    id: 'metadata', cat: 'edit', icon: 'info', name: 'Edit PDF properties', accept: 'pdf', kind: 'single',
+    desc: 'Change the title, author, subject and keywords, or strip hidden metadata before sharing.',
+    cta: 'Save properties', next: ['compress', 'protect'],
+    options: () => `
+      <label class="stack-field"><span>Title</span><input id="tvMetaTitle" class="text-input"></label>
+      <label class="stack-field"><span>Author</span><input id="tvMetaAuthor" class="text-input"></label>
+      <label class="stack-field"><span>Subject</span><input id="tvMetaSubject" class="text-input"></label>
+      <label class="stack-field"><span>Keywords</span><input id="tvMetaKeywords" class="text-input" placeholder="Separated by commas"></label>
+      <label class="check"><input type="checkbox" id="tvMetaStrip"> Remove everything else (dates, software names, hidden XMP data)</label>
+      <p class="muted small" id="tvMetaInfo"></p>`,
+    mounted: async () => {
+      const props = await readProperties(state.sources[0].bytes);
+      $('tvMetaTitle').value = props.title;
+      $('tvMetaAuthor').value = props.author;
+      $('tvMetaSubject').value = props.subject;
+      $('tvMetaKeywords').value = props.keywords;
+      const made = [props.creator, props.producer].filter(Boolean).join(' · ');
+      $('tvMetaInfo').textContent = made ? `Currently records: ${made}` : '';
+    },
+    run: async () => {
+      const bytes = await writeProperties(state.sources[0].bytes, {
+        title: $('tvMetaTitle').value, author: $('tvMetaAuthor').value,
+        subject: $('tvMetaSubject').value, keywords: $('tvMetaKeywords').value,
+      }, { strip: $('tvMetaStrip').checked });
+      return pdfResult(bytes, `${state.fileName}.pdf`, 'Properties saved', $('tvMetaStrip').checked ? 'Hidden metadata removed' : null);
     },
   },
   { id: 'edit', cat: 'edit', icon: 'edit', name: 'Edit PDF', accept: 'pdfimg', multiple: true, kind: 'editor', desc: 'Change existing text, add text, images, shapes and more.' },
@@ -280,7 +410,7 @@ const TOOLS = [
   },
   { id: 'redact', cat: 'security', icon: 'redact', name: 'Redact PDF', accept: 'pdf', kind: 'editor', desc: 'Permanently black out sensitive information.', then: () => { setTool('redact'); toast('Drag over what to remove, or use Find (Ctrl+F) → Redact all. It\'s removed for good when you download.'); } },
   {
-    id: 'protect', cat: 'security', icon: 'lock', name: 'Protect PDF', accept: 'pdf', kind: 'single',
+    id: 'protect', cat: 'security', icon: 'lock', name: 'Protect PDF', accept: 'pdf', kind: 'single', multiple: true, batch: true,
     desc: 'Add a password so only people who know it can open the file.',
     cta: 'Protect PDF', next: ['compress'],
     options: () => `
@@ -459,6 +589,8 @@ function openTool(tool) {
   tv.tool = tool;
   tv.files = [];
   tv.sel = new Set();
+  tv.batchMode = false;
+  tv.crop = null;
   tv.result = null;
   document.title = `${tool.name} — PDF Worker`;
   $('toolView').style.setProperty('--tool', catColor(tool.cat));
@@ -481,7 +613,7 @@ function openTool(tool) {
 function hubDrop(files) {
   if (tv.running) return;
   if (document.body.dataset.view === 'tool' && tv.tool && !$('tvPick').hidden) acceptFiles(files);
-  else if (document.body.dataset.view === 'tool' && tv.tool && tv.tool.kind === 'files' && tv.tool.multiple && !$('tvWork').hidden) addFileItems(files);
+  else if (document.body.dataset.view === 'tool' && tv.tool && (tv.tool.kind === 'files' || tv.batchMode) && tv.tool.multiple && !$('tvWork').hidden) addFileItems(files);
   else if (document.body.dataset.view === 'home') {
     // Dropping files on the home page opens them in the editor.
     location.hash = '#/edit';
@@ -507,6 +639,16 @@ async function acceptFiles(files) {
     if (tool.then) setTimeout(tool.then, 50);
     return;
   }
+
+  // Several files for a one-file tool: process each with the same options.
+  if (tool.batch && valid.length > 1) {
+    tv.batchMode = true;
+    tv.files = [];
+    await addFileItems(valid);
+    renderWork();
+    return;
+  }
+  tv.batchMode = false;
 
   if (tool.kind === 'files') {
     tv.files = [];
@@ -560,8 +702,8 @@ async function describeFile(item) {
       item.info = `${pages(doc.numPages)} · ${formatBytes(file.size)}`;
       doc.destroy();
     } else {
-      item.info = `${formatBytes(file.size)} · Word document`;
-      item.docx = true;
+      item.docx = /\.docx$/i.test(file.name);
+      item.info = `${formatBytes(file.size)} · ${item.docx ? 'Word document' : 'Spreadsheet'}`;
     }
   } catch (err) {
     if (err && err.name === 'PasswordException') item.info = `${formatBytes(file.size)} · password protected`;
@@ -574,11 +716,13 @@ function renderWork() {
   $('tvOptions').innerHTML = tool.options ? tool.options() : '';
   $('tvRun').textContent = tool.cta || 'Continue';
   $('tvRun').disabled = false;
-  if (tool.kind === 'files') renderFileList();
+  if (tool.kind === 'files' || tv.batchMode) renderFileList();
   else if (tool.kind === 'pages') renderPageGrid();
+  else if (tool.kind === 'crop') renderCrop();
   else renderSingle();
   wireOptions();
   if (tool.onOptions) tool.onOptions();
+  if (tool.mounted && !tv.batchMode) tool.mounted().catch((err) => console.warn(err));
 }
 
 function wireOptions() {
@@ -593,6 +737,8 @@ function wireOptions() {
   $('tvOptions').onclick = (e) => {
     const id = e.target.closest('button')?.id;
     if (id === 'tvAddMore') { $('tvInput').dataset.append = '1'; $('tvInput').click(); }
+    if (id === 'tvCropAuto') autoCropBox();
+    if (id === 'tvCropReset') { tv.crop.box = { l: 0, t: 0, r: 1, b: 1 }; positionCropBox(); }
     if (id === 'tvRotL' || id === 'tvRotR') {
       state.pages.forEach((p) => { p.rot = (p.rot + (id === 'tvRotR' ? 90 : 270)) % 360; });
       renderAll();
@@ -611,10 +757,10 @@ function renderFileList() {
     card.draggable = tv.files.length > 1;
     card.dataset.id = item.id;
     card.innerHTML = `
-      <div class="file-thumb">${item.thumb ? `<img alt="" src="${item.thumb}">` : iconSvg(item.docx ? 'word' : 'text')}</div>
+      <div class="file-thumb">${item.thumb ? `<img alt="" src="${item.thumb}">` : iconSvg(item.docx ? 'word' : 'sheet')}</div>
       <div class="file-name" title="${escapeHtml(item.file.name)}">${escapeHtml(item.file.name)}</div>
       <div class="file-info">${escapeHtml(item.info)}</div>
-      ${tv.files.length > 1 ? `<span class="file-order">${i + 1}</span>` : ''}
+      ${tv.files.length > 1 || tv.tool.fileLabels ? `<span class="file-order">${tv.tool.fileLabels?.[i] ?? i + 1}</span>` : ''}
       <button type="button" class="file-remove" title="Remove" aria-label="Remove ${escapeHtml(item.file.name)}">&times;</button>`;
     main.appendChild(card);
   });
@@ -626,10 +772,113 @@ function renderFileList() {
     add.addEventListener('click', () => { $('tvInput').dataset.append = '1'; $('tvInput').click(); });
     main.appendChild(add);
   }
+  if (tv.tool.maxFiles && tv.files.length > tv.tool.maxFiles) {
+    toast(`${tv.tool.name} uses ${tv.tool.maxFiles} files — the extra ones were left out.`);
+    tv.files = tv.files.slice(0, tv.tool.maxFiles);
+    renderFileList();
+    return;
+  }
+  if (tv.tool.maxFiles && tv.files.length >= tv.tool.maxFiles) main.querySelector('.add-card')?.remove();
   $('tvRun').disabled = !tv.files.length;
   if (tv.tool.id === 'merge') $('tvRun').textContent = tv.files.length > 1 ? `Merge ${tv.files.length} files` : 'Merge PDF';
+  if (tv.batchMode) $('tvRun').textContent = `${tv.tool.cta} · ${tv.files.length} file${tv.files.length === 1 ? '' : 's'}`;
+  tv.tool.onOptions?.();
   if (!tv.files.length) setStage('pick');
 }
+
+/* ---------------- crop view ---------------- */
+
+function renderCrop() {
+  const main = $('tvMain');
+  main.className = 'tv-main crop-view';
+  tv.crop = tv.crop || { page: 0, box: { l: 0, t: 0, r: 1, b: 1 } };
+  const handles = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((h) => `<span class="crop-h crop-${h}" data-h="${h}"></span>`).join('');
+  main.innerHTML = `
+    <div class="crop-nav">
+      <button type="button" class="icon-btn" data-crop="prev" aria-label="Previous page">‹</button>
+      <span id="cropLabel"></span>
+      <button type="button" class="icon-btn" data-crop="next" aria-label="Next page">›</button>
+    </div>
+    <div class="crop-frame" id="cropFrame"><canvas></canvas><div class="crop-box" id="cropBox">${handles}</div></div>`;
+  drawCropPage();
+}
+
+async function drawCropPage() {
+  const p = state.pages[tv.crop.page];
+  const frame = $('cropFrame');
+  if (!p || !frame) return;
+  $('cropLabel').textContent = `Page ${tv.crop.page + 1} of ${state.pages.length}`;
+  const avail = Math.max(200, Math.min(560, $('tvMain').clientWidth - 40));
+  const scale = Math.min(avail / p.baseW, 640 / p.baseH);
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const rendered = await rasterizePage(p, scale * dpr);
+  const canvas = frame.querySelector('canvas');
+  canvas.width = rendered.width;
+  canvas.height = rendered.height;
+  canvas.getContext('2d', { willReadFrequently: true }).drawImage(rendered, 0, 0);
+  canvas.style.width = `${p.baseW * scale}px`;
+  canvas.style.height = `${p.baseH * scale}px`;
+  positionCropBox();
+}
+
+function positionCropBox() {
+  const b = tv.crop.box;
+  Object.assign($('cropBox').style, { left: `${b.l * 100}%`, top: `${b.t * 100}%`, width: `${(b.r - b.l) * 100}%`, height: `${(b.b - b.t) * 100}%` });
+}
+
+function autoCropBox() {
+  const found = contentBounds($('cropFrame').querySelector('canvas'));
+  if (!found) { toast('This page looks blank — there is nothing to trim to.'); return; }
+  tv.crop.box = found;
+  positionCropBox();
+}
+
+function initCropDrag() {
+  const main = $('tvMain');
+  let drag = null;
+  main.addEventListener('click', (e) => {
+    const nav = e.target.closest('[data-crop]');
+    if (!nav || !tv.crop) return;
+    const n = state.pages.length;
+    tv.crop.page = (tv.crop.page + (nav.dataset.crop === 'next' ? 1 : n - 1)) % n;
+    drawCropPage();
+  });
+  main.addEventListener('pointerdown', (e) => {
+    const frame = e.target.closest('#cropFrame');
+    if (!frame || !tv.crop) return;
+    const handle = e.target.closest('.crop-h')?.dataset.h || (e.target.closest('.crop-box') ? 'move' : null);
+    if (!handle) return;
+    e.preventDefault();
+    frame.setPointerCapture(e.pointerId);
+    const r = frame.getBoundingClientRect();
+    drag = { handle, x: e.clientX, y: e.clientY, w: r.width, h: r.height, start: { ...tv.crop.box } };
+  });
+  main.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = (e.clientX - drag.x) / drag.w;
+    const dy = (e.clientY - drag.y) / drag.h;
+    const s = drag.start;
+    const b = { ...s };
+    const min = 0.05;
+    if (drag.handle === 'move') {
+      const w = s.r - s.l;
+      const h = s.b - s.t;
+      b.l = clamp(s.l + dx, 0, 1 - w); b.r = b.l + w;
+      b.t = clamp(s.t + dy, 0, 1 - h); b.b = b.t + h;
+    } else {
+      if (drag.handle.includes('w')) b.l = clamp(s.l + dx, 0, s.r - min);
+      if (drag.handle.includes('e')) b.r = clamp(s.r + dx, s.l + min, 1);
+      if (drag.handle.includes('n')) b.t = clamp(s.t + dy, 0, s.b - min);
+      if (drag.handle.includes('s')) b.b = clamp(s.b + dy, s.t + min, 1);
+    }
+    tv.crop.box = b;
+    positionCropBox();
+  });
+  const end = () => { drag = null; };
+  main.addEventListener('pointerup', end);
+  main.addEventListener('pointercancel', end);
+}
+
 
 function renderSingle() {
   const main = $('tvMain');
@@ -803,13 +1052,51 @@ function initToolPage() {
   });
 }
 
+// Runs a one-file tool on every file in the list and bundles the results in a ZIP.
+async function runBatch(tool) {
+  const zip = new JSZip();
+  const used = new Set();
+  const failed = [];
+  let done = 0;
+  const count = tv.files.length;
+  try {
+    for (const [n, item] of tv.files.entries()) {
+      job.prefix = `File ${n + 1} of ${count} · `;
+      job.range = [n / count, (n + 1) / count];
+      progress(item.file.name, 0);
+      await checkpoint();
+      try {
+        await loadQuietly([item.file]);
+        if (!state.pages.length) throw new Error("couldn't be opened");
+        const r = await tool.run();
+        let name = r.name;
+        for (let k = 2; used.has(name.toLowerCase()); k++) name = r.name.replace(/(\.[^.]+)$/, ` (${k})$1`);
+        used.add(name.toLowerCase());
+        zip.file(name, r.blob);
+        done++;
+      } catch (err) {
+        if (isCancel(err)) throw err;
+        console.warn(item.file.name, err);
+        failed.push(item.file.name);
+      }
+    }
+  } finally {
+    job.prefix = '';
+    job.range = [0, 1];
+  }
+  if (!done) throw new Error('none of the files could be processed');
+  const blob = await zipBlob(zip);
+  const detail = `${done} file${done === 1 ? '' : 's'} in a ZIP · ${formatBytes(blob.size)}${failed.length ? ` · skipped: ${failed.join(', ')}` : ''}`;
+  return { blob, name: `${tool.id}-${done}-files.zip`, title: `${done} of ${count} files done`, detail };
+}
+
 async function runTool() {
   const tool = tv.tool;
   if (!tool || tv.running) return;
   tv.running = true;
   showProgress(true, 'Working…');
   try {
-    const result = await tool.run();
+    const result = tv.batchMode ? await runBatch(tool) : await tool.run();
     dirty = false;
     tv.result = result;
     showResult(result);
@@ -856,6 +1143,7 @@ function initHub() {
   $('homeSearch').addEventListener('input', () => renderHome(filter, $('homeSearch').value));
   renderHome();
   initToolPage();
+  initCropDrag();
 
   window.addEventListener('hashchange', route);
   route();

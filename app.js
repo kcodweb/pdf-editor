@@ -127,7 +127,8 @@ class CancelledError extends Error {
   }
 }
 const isCancel = (err) => !!err && err.name === 'CancelledError';
-const job = { depth: 0, cancelled: false, onCancel: null };
+// prefix/range let a batch show "File 2 of 5 · …" and map each file's progress into its slice.
+const job = { depth: 0, cancelled: false, onCancel: null, prefix: '', range: [0, 1] };
 
 function busy(on, msg) {
   job.depth = Math.max(0, job.depth + (on ? 1 : -1));
@@ -135,6 +136,8 @@ function busy(on, msg) {
   if (on && job.depth === 1) {
     job.cancelled = false;
     job.onCancel = null;
+    job.prefix = '';
+    job.range = [0, 1];
     $('jobCancel').disabled = false;
   }
   document.body.classList.toggle('busy', active);
@@ -146,6 +149,7 @@ function busy(on, msg) {
 // Updates the progress card. fraction: 0..1, or null when the length of the work is unknown.
 function progress(text, fraction) {
   if (text) {
+    text = job.prefix + text;
     $('hint').textContent = text;
     if (!job.cancelled) $('jobText').textContent = text;
   }
@@ -153,7 +157,8 @@ function progress(text, fraction) {
   const bar = $('jobBar');
   const known = fraction !== null && Number.isFinite(fraction);
   bar.classList.toggle('indeterminate', !known);
-  bar.style.width = known ? `${Math.round(clamp(fraction, 0, 1) * 100)}%` : '';
+  const [a, b] = job.range;
+  bar.style.width = known ? `${Math.round((a + clamp(fraction, 0, 1) * (b - a)) * 100)}%` : '';
 }
 
 // Lets the browser paint and handle input; throws CancelledError once Cancel was pressed.

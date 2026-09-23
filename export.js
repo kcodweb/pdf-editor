@@ -62,6 +62,19 @@ async function buildPdf(pages, opts = {}, ctx = createExportContext()) {
     if (state.sources[src].hasForm && !formSource) formSource = doc;
   }
 
+  // Keep the original document's title, author and so on.
+  const firstSrc = pages.find((p) => p.src !== null)?.src;
+  if (firstSrc !== undefined) {
+    try {
+      const doc = await loadSourceDoc(ctx, firstSrc);
+      const copy = [['getTitle', 'setTitle'], ['getAuthor', 'setAuthor'], ['getSubject', 'setSubject'], ['getCreator', 'setCreator']];
+      for (const [get, set] of copy) { const v = doc[get](); if (v) out[set](v); }
+      const keywords = doc.getKeywords();
+      if (keywords) out.setKeywords(keywords.split(/[,;]\s*/).filter(Boolean));
+    } catch { /* metadata is optional */ }
+  }
+  out.setProducer('PDF Worker');
+
   const added = [];
   const total = state.pages.length;
   for (const [k, p] of pages.entries()) {
