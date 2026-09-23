@@ -138,6 +138,11 @@ function dismissModal(id) {
   else closeModal(id);
 }
 
+// Fingers need bigger targets than a mouse pointer.
+const COARSE = window.matchMedia('(pointer: coarse)').matches;
+const HANDLE_PX = COARSE ? 24 : 10;
+const HIT_PX = COARSE ? 26 : 12;
+
 const measureCtx = document.createElement('canvas').getContext('2d');
 // Text annotations using the PDF's original font fall back to a similar family when needed.
 const effectiveFamily = (a) => (a.font === 'original' ? a.fallback || 'sans' : a.font);
@@ -425,6 +430,7 @@ async function loadPdfFiles(files, replace) {
     }
     renderAll();
     if (replace) {
+      autoFit();
       viewer.scrollTop = 0;
       if (loaded[0].hasForm && !quietLoad) toast('This PDF has fillable fields — click a field to fill it in.');
     } else if (!quietLoad) {
@@ -481,6 +487,7 @@ async function addImagePages(files, replace, { size = 'letter', orientation = 'a
     state.pages.push(...pages);
     dirty = true;
     renderAll();
+    if (replace) autoFit();
     if (!replace && !quietLoad) scrollToPage(state.pages[first].id);
     if (!quietLoad) toast(`Added ${pages.length} image page${pages.length === 1 ? '' : 's'}.`);
   } finally {
@@ -495,9 +502,11 @@ function addBlankPage() {
   const page = { id: uid(), src: null, index: 0, baseW: w, baseH: h, rot0: 0, rot: 0, annots: [] };
   if (state.pages.length) pushHistory();
   else state.fileName = 'untitled';
+  const first = !state.pages.length;
   state.pages.splice(state.pages.length ? state.current + 1 : 0, 0, page);
   dirty = true;
   renderAll();
+  if (first) autoFit();
   scrollToPage(page.id);
 }
 
@@ -550,9 +559,18 @@ function sizePageEl(el, p) {
 
 function renderVisible() {
   const vr = viewer.getBoundingClientRect();
+  const keep = Math.max(3000, vr.height * 4);
   for (const el of pagesEl.children) {
     const r = el.getBoundingClientRect();
-    if (r.bottom > vr.top - 1200 && r.top < vr.bottom + 1200) renderCanvas(el);
+    if (r.bottom > vr.top - 1200 && r.top < vr.bottom + 1200) {
+      renderCanvas(el);
+    } else if (el.dataset.rendered && (r.bottom < vr.top - keep || r.top > vr.bottom + keep)) {
+      // Free the pixels of pages far off screen; long documents would otherwise pile up memory.
+      const canvas = el.querySelector('canvas');
+      renderTasks.get(el)?.cancel();
+      canvas.width = canvas.height = 0;
+      el.dataset.rendered = '';
+    }
   }
 }
 
@@ -658,7 +676,7 @@ function annotEl(a) {
     case 'ink': {
       const d = inkPath(a.points);
       wrap.append(
-        svgEl('path', { d, class: 'hit', fill: 'none', 'stroke-width': Math.max(a.width + 8, 12) }),
+        svgEl('path', { d, class: 'hit', fill: 'none', 'stroke-width': Math.max(a.width + 8, HIT_PX / state.zoom) }),
         svgEl('path', { d, fill: 'none', stroke: a.color, 'stroke-width': a.width, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }),
       );
       break;
@@ -681,7 +699,7 @@ function annotEl(a) {
     case 'line': {
       const geo = lineGeometry(a);
       wrap.append(
-        svgEl('path', { d: `M${a.x1} ${a.y1}L${a.x2} ${a.y2}`, class: 'hit', fill: 'none', 'stroke-width': Math.max(a.width + 10, 14) }),
+        svgEl('path', { d: `M${a.x1} ${a.y1}L${a.x2} ${a.y2}`, class: 'hit', fill: 'none', 'stroke-width': Math.max(a.width + 10, (HIT_PX + 2) / state.zoom) }),
         svgEl('path', { d: `M${a.x1} ${a.y1}L${geo.end[0]} ${geo.end[1]}`, fill: 'none', stroke: a.color, 'stroke-width': a.width, 'stroke-linecap': 'round' }),
       );
       if (geo.head) {
@@ -729,7 +747,7 @@ function annotEl(a) {
 
 function drawSelection(g, a) {
   const z = state.zoom;
-  const s = 10 / z;
+  const s = HANDLE_PX / z;
   const handle = (x, y, end) => g.appendChild(svgEl('rect', {
     class: end ? 'handle end' : 'handle', 'data-end': end, x: x - s / 2, y: y - s / 2, width: s, height: s, 'stroke-width': 1.5 / z,
   }));
@@ -855,6 +873,7 @@ thumbsEl.addEventListener('click', (e) => {
     state.pageSel.clear();
     pickAnchor = id;
     scrollToPage(id);
+    toggleDrawer(false);
   }
   refreshThumbState();
 });
@@ -880,25 +899,29 @@ thumbsEl.addEventListener('dragover', (e) => {
   const r = item.getBoundingClientRect();
   item.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after');
 });
+// Moves a dragged page (or all ticked pages, if it's one of them) before/after another page.
+function movePagesTo(dragId, targetId, after) {
+  const moving = state.pageSel.has(dragId) ? targetPageIds() : [dragId];
+  if (!targetId || moving.includes(targetId)) return;
+  finishEdit();
+  pushHistory();
+  const moved = state.pages.filter((p) => moving.includes(p.id));
+  state.pages = state.pages.filter((p) => !moving.includes(p.id));
+  let to = state.pages.findIndex((p) => p.id === targetId);
+  if (after) to++;
+  state.pages.splice(to, 0, ...moved);
+  state.current = to;
+  renderAll();
+}
+
 thumbsEl.addEventListener('drop', (e) => {
   if (!thumbDragId) return;
   e.preventDefault();
   const item = e.target.closest('.thumb');
   clearDropMarks();
-  // Dragging a ticked page moves all ticked pages together.
-  const moving = state.pageSel.has(thumbDragId) ? targetPageIds() : [thumbDragId];
-  if (item && !moving.includes(item.dataset.id)) {
+  if (item) {
     const r = item.getBoundingClientRect();
-    const after = e.clientY >= r.top + r.height / 2;
-    finishEdit();
-    pushHistory();
-    const moved = state.pages.filter((p) => moving.includes(p.id));
-    state.pages = state.pages.filter((p) => !moving.includes(p.id));
-    let to = state.pages.findIndex((p) => p.id === item.dataset.id);
-    if (after) to++;
-    state.pages.splice(to, 0, ...moved);
-    state.current = to;
-    renderAll();
+    movePagesTo(thumbDragId, item.dataset.id, e.clientY >= r.top + r.height / 2);
   }
   thumbDragId = null;
 });
@@ -980,26 +1003,54 @@ window.addEventListener('resize', () => renderVisible());
 
 /* ---------------- zoom ---------------- */
 
-function setZoom(z) {
+// The spot on a page under a screen point, so zooming can keep it under the cursor or fingers.
+function zoomAnchor(clientX, clientY) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const el of pagesEl.children) {
+    const r = el.getBoundingClientRect();
+    const dist = clientY < r.top ? r.top - clientY : clientY > r.bottom ? clientY - r.bottom : 0;
+    if (dist < bestDist) { best = { el, r }; bestDist = dist; }
+    if (dist === 0) break;
+  }
+  if (!best) return null;
+  const { el, r } = best;
+  return { id: el.dataset.id, fx: (clientX - r.left) / r.width, fy: (clientY - r.top) / r.height, clientX, clientY };
+}
+
+function setZoom(z, anchor) {
   z = clamp(Math.round(z * 100) / 100, 0.25, 4);
   if (z === state.zoom) return;
   finishEdit();
-  const ratio = viewer.scrollTop / Math.max(1, viewer.scrollHeight);
+  const vr = viewer.getBoundingClientRect();
+  const a = anchor || zoomAnchor(vr.left + vr.width / 2, vr.top + vr.height / 2);
   state.zoom = z;
   renderAll();
-  viewer.scrollTop = ratio * viewer.scrollHeight;
+  const el = a && pageElOf(a.id);
+  if (el) {
+    viewer.scrollLeft = el.offsetLeft + a.fx * el.offsetWidth - (a.clientX - vr.left);
+    viewer.scrollTop = el.offsetTop + a.fy * el.offsetHeight - (a.clientY - vr.top);
+  }
 }
 
 function fitWidth() {
   if (!state.pages.length) return;
   const widest = Math.max(...state.pages.map((p) => pageDims(p).w));
-  setZoom((viewer.clientWidth - 64) / widest);
+  const gutter = viewer.clientWidth < 500 ? 24 : 64;
+  setZoom((viewer.clientWidth - gutter) / widest);
+}
+
+// Newly opened documents that don't fit the window (e.g. on phones) start at fit-width.
+function autoFit() {
+  if (!state.pages.length || !viewer.clientWidth) return;
+  const widest = Math.max(...state.pages.map((p) => pageDims(p).w));
+  if (widest * state.zoom > viewer.clientWidth - 32) fitWidth();
 }
 
 viewer.addEventListener('wheel', (e) => {
   if (!e.ctrlKey || !state.pages.length) return;
   e.preventDefault();
-  setZoom(state.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+  setZoom(state.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1), zoomAnchor(e.clientX, e.clientY));
 }, { passive: false });
 
 /* ---------------- tools & style controls ---------------- */
@@ -1064,6 +1115,10 @@ function updateStyleControls() {
   $('stampOptions').hidden = state.tool !== 'stamp';
   $('stampKind').value = state.stampKind;
   $('stampText').hidden = state.stampKind !== 'custom';
+  $('selActions').hidden = !state.selected;
+  const hasControls = !$('selActions').hidden || !$('textStyle').hidden || !$('shapeKinds').hidden || !$('stampOptions').hidden
+    || !$('color').disabled || !$('sizeField').hidden;
+  $('contextbar').classList.toggle('empty', !hasControls);
 }
 
 function applyTextStyle(prop, value) {
@@ -1156,7 +1211,8 @@ function updateUI() {
 
 /* ---------------- pointer interaction ---------------- */
 
-pagesEl.addEventListener('pointerdown', (e) => {
+// Named so the touch layer (touch.js) can replay a finger tap through it.
+function onPagePointerDown(e) {
   if (e.button !== 0 || e.target.closest('.text-editor, .form-field, .note-editor')) return;
   const svg = e.target.closest('svg.overlay');
   const hadEditor = !!(editing || noteEditing);
@@ -1245,9 +1301,10 @@ pagesEl.addEventListener('pointerdown', (e) => {
   } else {
     return;
   }
-  svg.setPointerCapture(e.pointerId);
+  try { svg.setPointerCapture(e.pointerId); } catch { /* replayed taps have no live pointer */ }
   renderOverlay(p);
-});
+}
+pagesEl.addEventListener('pointerdown', onPagePointerDown);
 
 // Shift-drag snaps a line to 45° steps.
 function snapAngle(x1, y1, x2, y2) {
@@ -1406,6 +1463,7 @@ function startEdit(p, a, isNew, snap) {
   updateUI();
   requestAnimationFrame(() => {
     ta.focus();
+    if (COARSE) setTimeout(() => ta.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300);
     if (a.cover && isNew) ta.select();
   });
 }
@@ -1658,6 +1716,16 @@ $('fileImage').addEventListener('change', async (e) => {
   }
 });
 
+/* ---------------- page drawer (phones) ---------------- */
+
+function toggleDrawer(open) {
+  const show = open ?? !$('sidebar').classList.contains('open');
+  $('sidebar').classList.toggle('open', show);
+  $('sidebarBackdrop').hidden = !show;
+}
+$('btnPages').addEventListener('click', () => toggleDrawer());
+$('sidebarBackdrop').addEventListener('click', () => toggleDrawer(false));
+
 /* ---------------- menu ---------------- */
 
 function toggleMenu(open) {
@@ -1675,6 +1743,9 @@ const MENU_ACTIONS = {
   'export-images': () => openImageExportDialog(),
   split: () => openSplitDialog(),
   shortcuts: () => openModal('keysModal'),
+  open: () => openPicker(),
+  add: () => { $('fileMerge').value = ''; $('fileMerge').click(); },
+  blank: () => addBlankPage(),
 };
 
 $('btnMore').addEventListener('click', () => toggleMenu());
@@ -1703,6 +1774,8 @@ $('btnUndo').addEventListener('click', undo);
 $('btnRedo').addEventListener('click', redo);
 $('btnDelete').addEventListener('click', deleteSelected);
 $('btnDuplicate').addEventListener('click', duplicateSelected);
+$('btnDuplicateM').addEventListener('click', duplicateSelected);
+$('btnDeleteM').addEventListener('click', deleteSelected);
 $('btnZoomIn').addEventListener('click', () => setZoom(state.zoom * 1.2));
 $('btnZoomOut').addEventListener('click', () => setZoom(state.zoom / 1.2));
 $('btnFit').addEventListener('click', fitWidth);
@@ -1832,4 +1905,5 @@ initSearch();
 initOcr();
 initDecor();
 updateUI();
+initTouch();
 initHub();

@@ -678,6 +678,21 @@ function renderPageGrid() {
   });
 }
 
+// Reorders a file card or page card on a tool page (mouse drag-and-drop or long-press on touch).
+function hubMoveItem(dragId, targetId, after) {
+  if (!tv.tool || !tv.tool.reorder && tv.tool.kind !== 'files') return;
+  const list = tv.tool.kind === 'files' ? tv.files : state.pages;
+  const from = list.findIndex((x) => x.id === dragId);
+  if (from < 0 || dragId === targetId) return;
+  const [moved] = list.splice(from, 1);
+  let to = list.findIndex((x) => x.id === targetId);
+  if (to < 0) { list.splice(from, 0, moved); return; }
+  if (after) to++;
+  list.splice(to, 0, moved);
+  if (tv.tool.kind === 'files') renderFileList();
+  else { renderAll(); renderPageGrid(); }
+}
+
 function initToolPage() {
   $('tvChoose').addEventListener('click', () => { delete $('tvInput').dataset.append; $('tvInput').click(); });
   $('tvInput').addEventListener('change', async (e) => {
@@ -754,15 +769,7 @@ function initToolPage() {
     main.querySelectorAll('.drop-before, .drop-after').forEach((c) => c.classList.remove('drop-before', 'drop-after'));
     if (card && card.dataset.id !== dragId) {
       const r = card.getBoundingClientRect();
-      const after = e.clientX >= r.left + r.width / 2;
-      const list = tv.tool.kind === 'files' ? tv.files : state.pages;
-      const from = list.findIndex((x) => x.id === dragId);
-      const [moved] = list.splice(from, 1);
-      let to = list.findIndex((x) => x.id === card.dataset.id);
-      if (after) to++;
-      list.splice(to, 0, moved);
-      if (tv.tool.kind === 'files') renderFileList();
-      else { renderAll(); renderPageGrid(); }
+      hubMoveItem(dragId, card.dataset.id, e.clientX >= r.left + r.width / 2);
     }
     dragId = null;
   });

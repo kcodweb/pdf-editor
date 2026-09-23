@@ -121,15 +121,20 @@
     <svg viewBox="0 0 24 24" class="logo"><path d="M6 2h8l5 5v15H6z"/><path d="M14 2v5h5M9 13h7M9 17h5"/></svg>
     <span>PDF Worker</span>
   </a>
+  <button id="btnPages" class="icon-btn mobile-only" title="Pages" aria-label="Show pages"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="9" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/></svg></button>
 
-  <div class="group">
-    <button id="btnOpen" class="btn" title="Open a PDF or images (Ctrl+O)">Open</button>
-    <button id="btnMerge" class="btn" title="Append pages from other PDFs or images">Add files</button>
-    <button id="btnBlank" class="btn" title="Insert a blank page after the current page">Blank page</button>
+  <div class="group file-group">
+    <button id="btnOpen" class="btn file-btn" title="Open a PDF or images (Ctrl+O)">Open</button>
+    <button id="btnMerge" class="btn file-btn" title="Append pages from other PDFs or images">Add files</button>
+    <button id="btnBlank" class="btn file-btn" title="Insert a blank page after the current page">Blank page</button>
     <div class="menu-wrap">
-      <button id="btnMore" class="btn" aria-haspopup="menu" aria-expanded="false">More
-        <svg viewBox="0 0 24 24" class="chev"><path d="M6 9l6 6 6-6"/></svg></button>
+      <button id="btnMore" class="btn" aria-haspopup="menu" aria-expanded="false" aria-label="More"><span class="btn-label">More</span>
+        <svg viewBox="0 0 24 24" class="chev"><path d="M6 9l6 6 6-6"/></svg><svg viewBox="0 0 24 24" class="kebab"><circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/></svg></button>
       <div class="menu" id="moreMenu" role="menu" hidden>
+        <button role="menuitem" class="mobile-only" data-menu="open">Open a file…</button>
+        <button role="menuitem" class="mobile-only" data-menu="add" data-needs-doc>Add files…</button>
+        <button role="menuitem" class="mobile-only" data-menu="blank" data-needs-doc>Insert blank page</button>
+        <hr class="mobile-only">
         <button role="menuitem" data-menu="find" data-needs-doc>Find text<kbd>Ctrl+F</kbd></button>
         <button role="menuitem" data-menu="ocr" data-needs-doc>Recognize text in scans (OCR)…</button>
         <button role="menuitem" data-menu="decor" data-needs-doc>Page numbers, headers &amp; watermark…</button>
@@ -158,6 +163,7 @@
     <button class="tool" data-tool="sign" title="Signature (S)"><svg viewBox="0 0 24 24"><path d="M3 16c2 0 3-6 5-6s1 5 3 5 2-3 4-3 2 2 6 2M3 21h18"/></svg><span>Sign</span></button>
   </div>
 
+  <div class="contextbar" id="contextbar">
   <div class="group" id="textStyle" hidden>
     <select id="fontFamily" title="Font">
       <option value="original" hidden>Original font</option>
@@ -199,12 +205,17 @@
     <label class="field" title="Color"><input type="color" id="color" value="#e11d48"></label>
     <label class="field" id="sizeField"><span id="sizeLabel">Size</span><input type="number" id="size" min="1" max="300" value="3"></label>
   </div>
+  <div class="group mobile-only" id="selActions" hidden>
+    <button class="icon-btn" id="btnDuplicateM" title="Duplicate"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 00-1-1H5a1 1 0 00-1 1v10a1 1 0 001 1h3"/></svg></button>
+    <button class="icon-btn danger" id="btnDeleteM" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+  </div>
+  </div><!-- /contextbar -->
 
   <div class="group">
     <button id="btnUndo" class="icon-btn" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h11a5 5 0 010 10h-3"/></svg></button>
     <button id="btnRedo" class="icon-btn" title="Redo (Ctrl+Y)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H9a5 5 0 000 10h3"/></svg></button>
-    <button id="btnDuplicate" class="icon-btn" title="Duplicate selected (Ctrl+D)"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 00-1-1H5a1 1 0 00-1 1v10a1 1 0 001 1h3"/></svg></button>
-    <button id="btnDelete" class="icon-btn" title="Delete selected (Del)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+    <button id="btnDuplicate" class="icon-btn desktop-only" title="Duplicate selected (Ctrl+D)"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 00-1-1H5a1 1 0 00-1 1v10a1 1 0 001 1h3"/></svg></button>
+    <button id="btnDelete" class="icon-btn desktop-only" title="Delete selected (Del)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
   </div>
 
   <div class="group zoom">
@@ -216,12 +227,13 @@
 
   <div class="spacer"></div>
   <button id="btnDownload" class="btn primary" title="Download edited PDF (Ctrl+S)">
-    <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Download
+    <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="btn-label">Download</span>
   </button>
 </header>
 
 <div class="main">
-  <aside class="sidebar">
+  <div class="sidebar-backdrop" id="sidebarBackdrop" hidden></div>
+  <aside class="sidebar" id="sidebar">
     <div class="side-head">
       <div class="side-title">
         <span id="pageCount">Pages</span>
@@ -550,6 +562,7 @@
 <script src="convert.js"></script>
 <script src="hub.js"></script>
 <script src="native.js"></script>
+<script src="touch.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
